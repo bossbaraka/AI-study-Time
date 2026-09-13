@@ -1,0 +1,118 @@
+// ================================================================
+// MUREEH OFFICIAL AUTH GATEWAY — persistent store
+// SQLite via Prisma. Swap for Postgres later by editing the
+// datasource only; no application code changes.
+// ================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/// Accounts for every portal (gateways): student, guardian, admin.
+/// `status` is the official lifecycle: pending → active | suspended.
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  passwordHash      String
+  name              String
+  role              String // student | guardian | admin
+  nationalId        String?   @unique
+  status            String    @default("pending") // pending | active | suspended
+  emailVerification String    @default("verified") // invitation flow pre-verifies
+  onboarding        String    @default("not-started") // drives post-auth routing
+  failedAttempts    Int       @default(0)
+  lockedUntil       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  sessions          Session[]
+  sentInvitations   Invitation[]  @relation("Inviter")
+  acceptedInvite    Invitation[]  @relation("Invitee")
+  auditAsActor      AuditEvent[]  @relation("Actor")
+  auditAsSubject    AuditEvent[]  @relation("Subject")
+  resetTokens       PasswordResetToken[]
+}
+
+/// Server-side sessions. Only the SHA-256 of the cookie token is
+/// stored — a database leak can never be replayed as a session.
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  userAgent String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Institutional registration: accounts exist only through an
+/// invitation issued by the administration portal.
+model Invitation {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  email       String
+  role        String // student | guardian
+  nationalId  String?
+  note        String?
+  status      String    @default("pending") // pending | accepted | revoked
+  invitedById String
+  acceptedById String?
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  invitedBy User? @relation("Inviter", fields: [invitedById], references: [id])
+  acceptedBy User? @relation("Invitee", fields: [acceptedById], references: [id])
+
+  @@index([status])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Append-only audit trail for every security-relevant action.
+model AuditEvent {
+  id        String   @id @default(cuid())
+  type      String // login_success | login_failed | login_locked | logout | register_pending | approval | suspension | session_revocation | password_reset ...
+  userId    String?
+  actorId   String?
+  ip        String?
+  userAgent String?
+  meta      String?
+  createdAt DateTime @default(now())
+
+  user  User? @relation("Subject", fields: [userId], references: [id])
+  actor User? @relation("Actor", fields: [actorId], references: [id])
+
+  @@index([createdAt])
+}
+
+/// Internal dev outbox — stands in for the future email gateway.
+/// Links (verification/reset) are delivered here in this environment;
+/// the seam is the writer: swap the insert for a real mail transport.
+model OutboxMessage {
+  id        String   @id @default(cuid())
+  to        String
+  subject   String
+  body      String
+  kind      String // invite | reset | welcome
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

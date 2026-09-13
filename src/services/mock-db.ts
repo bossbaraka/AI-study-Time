@@ -1,0 +1,75 @@
+/**
+ * In-memory mock store.
+ * Holds mutable state so mutations (starting missions, answering recall,
+ * submitting tests, reading notifications) behave like a real backend
+ * within a session. Services are the only consumers of this module.
+ */
+
+import {
+  mockAchievements,
+  mockBehavior,
+  mockCertificates,
+  mockDailyPlan,
+  mockGoal,
+  mockMastery,
+  mockMentorContext,
+  mockMentorMessages,
+  mockMission,
+  mockNotifications,
+  mockPlans,
+  mockGuardianSummary,
+  mockRecallCards,
+  mockRecallStats,
+  mockRecoveryPlan,
+  mockResources,
+  mockRoadmap,
+  mockStudent,
+  mockTestResult,
+  mockTests,
+} from "@/mocks/data";
+import { clone } from "@/lib/api/client";
+import type {
+  Achievement,
+  AppNotification,
+  BehaviorProfile,
+  Certificate,
+  DailyPlan,
+  Goal,
+  GuardianSummary,
+  LearningResource,
+  MentorContext,
+  MentorMessage,
+  Mission,
+  ModuleMastery,
+  RecallCard,
+  RecallSessionStats,
+  RecoveryPlan,
+  Roadmap,
+  StudentProfile,
+  SubscriptionPlan,
+  Test,
+  TestResult,
+} from "@/types/domain";
+
+export const db = {
+  student: clone<StudentProfile>(mockStudent),
+  goal: clone<Goal>(mockGoal),
+  roadmap: clone<Roadmap>(mockRoadmap),
+  dailyPlan: clone<DailyPlan>(mockDailyPlan),
+  mission: clone<Mission>(mockMission),
+  resources: clone<LearningResource[]>(mockResources),
+  recallCards: clone<RecallCard[]>(mockRecallCards),
+  recallStats: clone<RecallSessionStats>(mockRecallStats),
+  tests: clone<Test[]>(mockTests),
+  testResults: clone<TestResult[]>([mockTestResult]),
+  mastery: clone<ModuleMastery[]>(mockMastery),
+  behavior: clone<BehaviorProfile>(mockBehavior),
+  recovery: clone<RecoveryPlan>(mockRecoveryPlan),
+  mentorContext: clone<MentorContext>(mockMentorContext),
+  mentorMessages: clone<MentorMessage[]>(mockMentorMessages),
+  achievements: clone<Achievement[]>(mockAchievements),
+  certificates: clone<Certificate[]>(mockCertificates),
+  notifications: clone<AppNotification[]>(mockNotifications),
+  plans: clone<SubscriptionPlan[]>(mockPlans),
+  guardian: clone<GuardianSummary>(mockGuardianSummary),
+};
