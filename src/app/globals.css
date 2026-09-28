@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=Noto+Kufi+Arabic:wght@500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -11,9 +12,10 @@
 
 :root,
 .light {
-  /* Type — next/font variables (layout.tsx) with system fallbacks */
-  --font-sans: var(--font-body), "IBM Plex Sans Arabic", ui-sans-serif,
-    system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  /* Type — institutional bilingual typography with system fallbacks */
+  --font-body: "IBM Plex Sans Arabic", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  --font-display: "Noto Kufi Arabic", "IBM Plex Sans Arabic", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-body);
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono",
     Menlo, monospace;
 
