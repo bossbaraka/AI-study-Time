@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { mockAssessmentEngine } from "@/services/engines.server";
-import { withStudent } from "@/lib/server/auth/request";
+import { assessmentApplication } from "@/services/application/assessment-application";
+import { invalidRequestResponse, withStudent } from "@/lib/server/auth/request";
+import { assessmentSessionIdParamSchema } from "@/schemas/assessment-api";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +13,8 @@ interface Ctx {
 /** POST /api/assessment/sessions/:sessionId/complete — ownership enforced by the engine. */
 export async function POST(req: Request, { params }: Ctx): Promise<NextResponse> {
   const { sessionId } = await params;
+  if (!assessmentSessionIdParamSchema.safeParse(sessionId).success) return invalidRequestResponse();
   return withStudent(req, async (student) =>
-    NextResponse.json(await mockAssessmentEngine.completeSession(sessionId, student.id)),
+    NextResponse.json(await assessmentApplication.completeSession(sessionId, student.id)),
   );
 }

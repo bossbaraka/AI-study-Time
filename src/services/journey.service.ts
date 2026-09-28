@@ -5,7 +5,7 @@
  */
 
 import { getAuthoritativeDashboardGoal } from "@/services/goals/active-goal-projection";
-import { clone, mockRequest } from "@/lib/api/client";
+import { ApiError, clone, GOALS_USE_API, isDemoDataEnabled, mockRequest } from "@/lib/api/client";
 import { db } from "@/services/mock-db";
 import type {
   DailyPlan,
@@ -26,8 +26,16 @@ export const studentService = {
 
 export const goalService = {
   getCurrent(signal?: AbortSignal): Promise<Goal> {
-    // One authoritative active goal (§6): the student's locked Phase-5
-    // goal when present; the seeded mock only as a fallback.
+    // In the live application, project only the authenticated student's real
+    // goal. An empty account is an honest 404, never a seeded demo goal.
+    if (GOALS_USE_API && !isDemoDataEnabled()) {
+      return getAuthoritativeDashboardGoal().then((goal) => {
+        if (!goal) throw new ApiError("goal_not_found", 404, "goal_not_found");
+        return goal;
+      });
+    }
+
+    // The seeded fallback is confined to Vitest or an explicit local demo.
     return mockRequest(async () => {
       const authoritative = await getAuthoritativeDashboardGoal();
       return authoritative ?? clone(db.goal);

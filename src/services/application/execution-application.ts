@@ -11,7 +11,7 @@
  * **Server-only.**
  */
 
-import { mockExecutionEngine as executionEngine } from "@/services/engines.server";
+import { executionEngine } from "@/services/engines.server";
 import type {
   LearningUnitExecution,
   RoadmapExecutionView,

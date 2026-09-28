@@ -16,6 +16,7 @@ import { z } from "zod";
 import {
   CONSTRAINT_KINDS,
   CURRENT_LEVELS,
+  GOAL_DOMAIN_PRESETS,
   MOTIVATION_KINDS,
   TARGET_LEVELS,
 } from "@/types/goal";
@@ -24,17 +25,7 @@ import {
    form would have, and nothing that the form would have accepted. */
 
 const goalDomainSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("preset"), presetId: z.enum([
-    "javascript",
-    "frontend",
-    "backend",
-    "software_engineering",
-    "ai",
-    "data_science",
-    "cybersecurity",
-    "english",
-    "mathematics",
-  ]) }),
+  z.object({ kind: z.literal("preset"), presetId: z.enum(GOAL_DOMAIN_PRESETS) }),
   z.object({ kind: z.literal("custom"), label: z.string().trim().min(1).max(60) }),
 ]);
 
@@ -62,8 +53,8 @@ export const goalDiscoveryInputSchema = z.object({
   targetLevel: z.enum(TARGET_LEVELS),
   timeframe: goalTimeframeSchema,
   weeklyCommitment: goalCommitmentSchema,
-  constraints: z.array(z.enum(CONSTRAINT_KINDS)).max(20),
-  successCriteria: z.array(z.string().trim().min(1).max(160)).max(20).optional(),
+  constraints: z.array(z.enum(CONSTRAINT_KINDS)),
+  successCriteria: z.array(z.string().trim().min(1).max(160)).optional(),
 });
 
 /**

@@ -25,10 +25,13 @@ const composed = composeEngines(stores, {
   diagnosisViaHttp: false,
 });
 
-export const mockAssessmentEngine = composed.assessment;
-export const mockGoalEngine = composed.goal;
-export const mockRoadmapEngine = composed.roadmap;
-export const mockExecutionEngine = composed.execution;
+// These are production engines backed by Prisma stores. Keep names distinct
+// from the browser/test composition root, whose mock adapters live in
+// `engines.ts`.
+export const assessmentEngine = composed.assessment;
+export const goalEngine = composed.goal;
+export const roadmapEngine = composed.roadmap;
+export const executionEngine = composed.execution;
 export const assessmentResultSource = composed.assessmentResultSource;
 
 /** Test seam: empties the learning tables. Awaits, because this is I/O. */

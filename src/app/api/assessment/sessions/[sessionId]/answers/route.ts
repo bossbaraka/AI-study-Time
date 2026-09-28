@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { mockAssessmentEngine } from "@/services/engines.server";
+import { assessmentApplication } from "@/services/application/assessment-application";
 import { invalidRequestResponse, withStudent } from "@/lib/server/auth/request";
-import { submitAnswerSchema } from "@/schemas/assessment-api";
+import { assessmentSessionIdParamSchema, submitAnswerSchema } from "@/schemas/assessment-api";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,9 +22,10 @@ export async function POST(req: Request, { params }: Ctx): Promise<NextResponse>
   const parsed = submitAnswerSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return invalidRequestResponse();
   const { sessionId } = await params;
+  if (!assessmentSessionIdParamSchema.safeParse(sessionId).success) return invalidRequestResponse();
   if (parsed.data.sessionId !== sessionId) return invalidRequestResponse();
 
   return withStudent(req, async (student) =>
-    NextResponse.json(await mockAssessmentEngine.submitAnswer(parsed.data, student.id)),
+    NextResponse.json(await assessmentApplication.submitAnswer(parsed.data, student.id)),
   );
 }

@@ -362,8 +362,18 @@ export function createGateway(db: PrismaClient) {
 
     /* ---------------- password recovery ---------------------------- */
 
-    async forgotPassword(emailRaw: string): Promise<{ status: "submitted" }> {
+    async forgotPassword(
+      emailRaw: string,
+      meta: GatewayMeta = {},
+    ): Promise<{ status: "submitted" }> {
       const email = emailRaw.trim().toLowerCase();
+      const emailKey = createHash("sha256").update(email).digest("hex");
+      // Bound both one target account and one source. The same response is
+      // kept for unknown accounts, so this does not become an enumeration
+      // oracle. The limiter is process-local; see the production-hardening note.
+      const perEmail = checkRate(`password-forgot:email:${emailKey}`, 5);
+      const perIp = checkRate(`password-forgot:ip:${meta.ip ?? "local"}`, 10);
+      if (!perEmail.ok || !perIp.ok) throw new AuthGatewayError("rate_limited", 429);
       const user = await db.user.findUnique({ where: { email } });
       if (user && user.status === "active") {
         await db.passwordResetToken.deleteMany({ where: { userId: user.id, usedAt: null } });
@@ -387,7 +397,14 @@ export function createGateway(db: PrismaClient) {
       return { status: "submitted" };
     },
 
-    async resetPassword(token: string, password: string): Promise<{ status: "reset" }> {
+    async resetPassword(
+      token: string,
+      password: string,
+      meta: GatewayMeta = {},
+    ): Promise<{ status: "reset" }> {
+      // Token guesses are bounded per source address before any database work.
+      const rate = checkRate(`password-reset:${meta.ip ?? "local"}`, 10);
+      if (!rate.ok) throw new AuthGatewayError("rate_limited", 429);
       const row = await db.passwordResetToken.findUnique({
         where: { tokenHash: hashToken(token) },
       });

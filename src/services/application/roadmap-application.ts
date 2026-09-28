@@ -11,7 +11,7 @@
  * **Server-only.**
  */
 
-import { mockRoadmapEngine as roadmapEngine } from "@/services/engines.server";
+import { roadmapEngine } from "@/services/engines.server";
 import type { Roadmap, RoadmapGenerationResult } from "@/types/roadmap";
 
 export const roadmapApplication = {

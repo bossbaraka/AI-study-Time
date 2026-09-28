@@ -58,6 +58,9 @@ export const assessmentResponseSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
+/** Dynamic resource ids are bounded before any repository read. */
+export const assessmentSessionIdParamSchema = z.string().trim().min(1).max(64);
+
 export const submitAnswerSchema = z.object({
   sessionId: z.string().trim().min(1).max(64),
   response: assessmentResponseSchema,

@@ -278,6 +278,27 @@ describe("official lifecycle: suspension revokes live sessions", () => {
 });
 
 describe("password recovery", () => {
+  it("rate-limits password recovery requests per address without changing the generic response", async () => {
+    const email = "rate-limited-reset@example.test";
+    const meta = { ip: `forgot-${crypto.randomUUID()}` };
+    for (let i = 0; i < 5; i += 1) {
+      await expect(gateway.forgotPassword(email, meta)).resolves.toEqual({ status: "submitted" });
+    }
+    const limited = await expectRejection(gateway.forgotPassword(email, meta));
+    expect(limited).toBeInstanceOf(AuthGatewayError);
+    expect((limited as AuthGatewayError).code).toBe("rate_limited");
+  });
+
+  it("rate-limits reset-token guesses per source address", async () => {
+    const meta = { ip: `reset-${crypto.randomUUID()}` };
+    for (let i = 0; i < 10; i += 1) {
+      const error = await expectRejection(gateway.resetPassword(`invalid-token-${i}`, "securePass1", meta));
+      expect((error as AuthGatewayError).code).toBe("token_invalid");
+    }
+    const limited = await expectRejection(gateway.resetPassword("another-invalid-token", "securePass1", meta));
+    expect((limited as AuthGatewayError).code).toBe("rate_limited");
+  });
+
   it("delivers a single-use reset link through the outbox and kills old sessions", async () => {
     const code = await invite("forgot@test.local");
     await gateway.register(

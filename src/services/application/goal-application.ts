@@ -11,7 +11,7 @@
  * **Server-only.** It imports the Prisma-backed composition root.
  */
 
-import { mockGoalEngine as goalEngine, assessmentResultSource } from "@/services/engines.server";
+import { goalEngine, assessmentResultSource } from "@/services/engines.server";
 import type {
   GoalDiscoveryInput,
   GoalRefinePatch,

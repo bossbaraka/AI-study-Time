@@ -3,6 +3,7 @@ import { registerApiSchema } from "@/schemas/auth";
 import {
   csrfRejected,
   errorResponse,
+  failureContext,
   forbiddenResponse,
   gateway,
   invalidRequestResponse,
@@ -14,6 +15,7 @@ export const dynamic = "force-dynamic";
 
 /** POST /api/auth/register — invitation-gated official registration. */
 export async function POST(req: Request): Promise<NextResponse> {
+  const failure = failureContext(req, "auth");
   if (csrfRejected(req)) return forbiddenResponse();
   const body: unknown = await req.json().catch(() => null);
   const parsed = registerApiSchema.safeParse(body);
@@ -32,6 +34,6 @@ export async function POST(req: Request): Promise<NextResponse> {
     );
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
-    return await errorResponse(error);
+    return await errorResponse(error, failure);
   }
 }

@@ -100,12 +100,14 @@ import { GET as getActiveSession } from "@/app/api/assessment/sessions/active/ro
 import { GET as getSession } from "@/app/api/assessment/sessions/[sessionId]/route";
 import { POST as submitAnswer } from "@/app/api/assessment/sessions/[sessionId]/answers/route";
 import { POST as pauseSession } from "@/app/api/assessment/sessions/[sessionId]/pause/route";
+import { POST as resumeSession } from "@/app/api/assessment/sessions/[sessionId]/resume/route";
+import { POST as completeSession } from "@/app/api/assessment/sessions/[sessionId]/complete/route";
 import { GET as getResults } from "@/app/api/assessment/sessions/[sessionId]/results/route";
 import { GET as getLatestResult } from "@/app/api/assessment/results/latest/route";
 import { __clearRateBuckets } from "@/lib/server/auth/rate-limit";
-import { errorResponse } from "@/lib/server/auth/request";
+import { errorResponse, failureContext } from "@/lib/server/auth/request";
 import { PersistenceConflictError } from "@/services/ports/stores";
-import { mockAssessmentEngine } from "@/services/engines.server";
+import { assessmentEngine } from "@/services/engines.server";
 import { prisma } from "@/lib/server/db";
 import type { AssessmentSession, SubmitAnswerPayload } from "@/types/assessment";
 
@@ -140,7 +142,7 @@ function signInAs(token: string | undefined) {
 /** Plays student A's session to a completed diagnosis. */
 async function completeAsA(sessionId: string) {
   for (let i = 0; i < 40; i += 1) {
-    const current = await mockAssessmentEngine.getSession(sessionId, STUDENT_A);
+    const current = await assessmentEngine.getSession(sessionId, STUDENT_A);
     if (current.status !== "in_progress") break;
     const question = current.currentQuestion!;
     const firstOptionId = question.options?.[0]?.id ?? "a";
@@ -148,13 +150,13 @@ async function completeAsA(sessionId: string) {
       question.type === "multiple_choice" || question.type === "scenario"
         ? { type: question.type, questionId: question.id, optionId: firstOptionId }
         : { type: question.type, questionId: question.id, answer: "an answer" };
-    await mockAssessmentEngine.submitAnswer(
+    await assessmentEngine.submitAnswer(
       { sessionId, response, submissionId: `sub_${i}` } as SubmitAnswerPayload,
       STUDENT_A,
     );
   }
-  const still = await mockAssessmentEngine.getSession(sessionId, STUDENT_A);
-  if (still.status === "in_progress") await mockAssessmentEngine.completeSession(sessionId, STUDENT_A);
+  const still = await assessmentEngine.getSession(sessionId, STUDENT_A);
+  if (still.status === "in_progress") await assessmentEngine.completeSession(sessionId, STUDENT_A);
 }
 
 async function body(res: Response) {
@@ -168,7 +170,7 @@ beforeEach(async () => {
   sessions.set(TOKEN_GUARDIAN, { id: "guardian_01", role: "guardian" });
   cookieJar.token = undefined;
   __clearRateBuckets();
-  await mockAssessmentEngine.__reset();
+  await assessmentEngine.__reset();
   // The routes now run on PostgreSQL, so the owners have to exist: every
   // learning row carries a foreign key to `User`.
   for (const id of [STUDENT_A, STUDENT_B, "guardian_01"]) {
@@ -194,7 +196,7 @@ describe("POST /api/assessment/sessions — authentication and ownership", () =>
     expect(res.status).toBe(401);
     expect(await body(res)).toEqual({ code: "session_expired" });
     // No session was created for anyone.
-    expect(await mockAssessmentEngine.getActiveSession(STUDENT_A)).toBeNull();
+    expect(await assessmentEngine.getActiveSession(STUDENT_A)).toBeNull();
   });
 
   it("refuses a signed-in guardian: only students take assessments", async () => {
@@ -210,8 +212,8 @@ describe("POST /api/assessment/sessions — authentication and ownership", () =>
     const res = await call(createSession, json({ studentId: STUDENT_B }));
     expect(res.status).toBe(201);
     const created = (await body(res)) as unknown as AssessmentSession;
-    expect((await mockAssessmentEngine.getActiveSession(STUDENT_A))?.id).toBe(created.id);
-    expect(await mockAssessmentEngine.getActiveSession(STUDENT_B)).toBeNull();
+    expect((await assessmentEngine.getActiveSession(STUDENT_A))?.id).toBe(created.id);
+    expect(await assessmentEngine.getActiveSession(STUDENT_B)).toBeNull();
   });
 
   it("rejects a malformed profile with 400 instead of reaching the generator", async () => {
@@ -268,7 +270,7 @@ describe("assessment session ownership over HTTP (§43.6)", () => {
     expect((await body(res)).id).toBe(created.id);
   });
 
-  it("rejects a non-owner's answer, pause and results read", async () => {
+  it("rejects a non-owner's answer, lifecycle transitions and results read", async () => {
     signInAs(TOKEN_A);
     const created = (await body(
       await call(createSession, json({})),
@@ -299,6 +301,24 @@ describe("assessment session ownership over HTTP (§43.6)", () => {
     );
     expect(pause.status).toBe(404);
 
+    const resume = await resumeSession(
+      new Request(`${ORIGIN}/api/assessment/sessions/${created.id}/resume`, {
+        method: "POST",
+        headers: { origin: ORIGIN, host: "mureeh.test" },
+      }),
+      params(created.id),
+    );
+    expect(resume.status).toBe(404);
+
+    const complete = await completeSession(
+      new Request(`${ORIGIN}/api/assessment/sessions/${created.id}/complete`, {
+        method: "POST",
+        headers: { origin: ORIGIN, host: "mureeh.test" },
+      }),
+      params(created.id),
+    );
+    expect(complete.status).toBe(404);
+
     const results = await getResults(
       new Request(`${ORIGIN}/api/assessment/sessions/${created.id}/results`),
       params(created.id),
@@ -307,7 +327,7 @@ describe("assessment session ownership over HTTP (§43.6)", () => {
 
     // A's session is untouched.
     signInAs(TOKEN_A);
-    expect((await mockAssessmentEngine.getSession(created.id, STUDENT_A)).progress.questionsAnswered).toBe(0);
+    expect((await assessmentEngine.getSession(created.id, STUDENT_A)).progress.questionsAnswered).toBe(0);
   });
 
   it("scopes /sessions/active and /results/latest to the caller", async () => {
@@ -337,7 +357,7 @@ describe("server-authoritative grading over HTTP (§43.5)", () => {
     const question = created.currentQuestion!;
 
     const gradeWith = async (extra: Record<string, unknown>, submissionId: string) => {
-      await mockAssessmentEngine.__reset();
+      await assessmentEngine.__reset();
       __clearRateBuckets();
       const fresh = (await body(
         await call(
@@ -460,6 +480,18 @@ describe("answer key boundary, HTTP ↔ database (§20)", () => {
  * from a bug. None of the three may surface as a bare 500, and none may carry
  * a driver message.
  */
+describe("dynamic path validation", () => {
+  it("rejects an oversized session id before repository access", async () => {
+    signInAs(TOKEN_A);
+    const res = await getSession(
+      new Request(`${ORIGIN}/api/assessment/sessions/x`),
+      params("x".repeat(65)),
+    );
+    expect(res.status).toBe(400);
+    expect(await body(res)).toEqual({ code: "unknown" });
+  });
+});
+
 describe("error mapping at the HTTP boundary (§28)", () => {
   it("maps a constraint conflict to 409, not 500", async () => {
     const res = await errorResponse(new PersistenceConflictError("duplicate_key"));
@@ -482,5 +514,30 @@ describe("error mapping at the HTTP boundary (§28)", () => {
     const payload = JSON.stringify(await res.json());
     expect(payload).toEqual(JSON.stringify({ code: "unknown" }));
     expect(payload).not.toContain("SELECT");
+  });
+
+  it("logs a structured, request-correlated failure without the error message", async () => {
+    const logger = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const req = new Request(`${ORIGIN}/api/assessment/sessions`, {
+        headers: { "x-request-id": "phase3-request-17" },
+      });
+      const context = failureContext(req, "assessment-create");
+      context.userId = STUDENT_A;
+      await errorResponse(new Error("secret query text"), context);
+
+      expect(logger).toHaveBeenCalledTimes(1);
+      const record = JSON.parse(String(logger.mock.calls[0]?.[0])) as Record<string, unknown>;
+      expect(record).toMatchObject({
+        event: "request_failed",
+        status: 500,
+        operation: "assessment-create /api/assessment/sessions",
+        requestId: "phase3-request-17",
+        userId: STUDENT_A,
+      });
+      expect(JSON.stringify(record)).not.toContain("secret query text");
+    } finally {
+      logger.mockRestore();
+    }
   });
 });

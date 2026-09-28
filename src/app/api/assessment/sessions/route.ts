@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
-import { generateAssessmentQuestions } from "@/lib/server/ai/question-generator";
 import { AuthGatewayError } from "@/lib/server/auth/gateway";
 import { checkRate } from "@/lib/server/auth/rate-limit";
 import { invalidRequestResponse, withStudent } from "@/lib/server/auth/request";
 import { createSessionSchema } from "@/schemas/assessment-api";
-import { mockAssessmentEngine } from "@/services/engines.server";
+import { assessmentApplication } from "@/services/application/assessment-application";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,10 +31,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     const rate = checkRate(`assessment:create:${student.id}`, 12);
     if (!rate.ok) throw new AuthGatewayError("rate_limited", 429);
 
-    const profile = parsed.data.profile;
-    const customData = profile ? await generateAssessmentQuestions(profile) : undefined;
-
-    const session = await mockAssessmentEngine.createSession(student.id, profile, customData);
+    const session = await assessmentApplication.createSession(student.id, parsed.data.profile);
     return NextResponse.json(session, { status: 201 });
   });
 }

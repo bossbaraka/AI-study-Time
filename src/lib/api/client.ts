@@ -22,6 +22,14 @@ export const ROADMAPS_USE_API = REAL_TRANSPORT;
 export const EXECUTIONS_USE_API = REAL_TRANSPORT;
 
 /**
+ * Explicit developer-only demo-data opt-in for domains without real APIs yet.
+ * Ignored in production even if someone accidentally ships the variable.
+ */
+export function isDemoDataEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" && process.env.NEXT_PUBLIC_DEMO_DATA === "true";
+}
+
+/**
  * AUTH GATEWAY MODE.
  *
  * Authentication runs against the real server-side gateway
@@ -113,6 +121,13 @@ export async function mockRequest<T>(
   resolver: () => T | Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
+  // Demo rows are useful in unit tests and in an explicitly opted-in local
+  // demo. They are never a production transport, and an absent real API must
+  // not be disguised as successful fake student data (§3, §29).
+  if (!process.env.VITEST && !isDemoDataEnabled()) {
+    throw new ApiError("feature_deferred", 501, "feature_deferred");
+  }
+
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(resolve, randomLatency());
     signal?.addEventListener(

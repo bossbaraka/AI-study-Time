@@ -215,8 +215,8 @@ export async function withAdmin(
 
 /**
  * Standard student route wrapper: CSRF check for writes, real session →
- * student role check, typed error funnel. Domain errors thrown by an
- * engine (`ApiError`) are mapped by the caller-supplied `toStatus`.
+ * student role check, typed error funnel. Recognized domain errors are mapped
+ * by `mapDomainError` without flattening their stable public code.
  */
 export async function withStudent(
   req: Request,
@@ -233,7 +233,7 @@ export async function withStudent(
   }
 }
 
-function failureContext(req: Request, scope: string): FailureContext {
+export function failureContext(req: Request, scope: string): FailureContext {
   return {
     operation: `${scope} ${new URL(req.url).pathname}`,
     requestId: req.headers.get("x-request-id") ?? crypto.randomUUID(),

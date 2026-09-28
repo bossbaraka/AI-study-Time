@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { mockAssessmentEngine } from "@/services/engines.server";
+import { assessmentApplication } from "@/services/application/assessment-application";
 import { withStudent } from "@/lib/server/auth/request";
 
 export const runtime = "nodejs";
@@ -14,6 +14,6 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(req: Request): Promise<NextResponse> {
   return withStudent(req, async (student) =>
-    NextResponse.json(await mockAssessmentEngine.getLatestCompletedResult(student.id)),
+    NextResponse.json(await assessmentApplication.getLatestCompletedResult(student.id)),
   );
 }
