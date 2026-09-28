@@ -1,7 +1,10 @@
 // ================================================================
 // MUREEH OFFICIAL AUTH GATEWAY — persistent store
-// SQLite via Prisma. Swap for Postgres later by editing the
-// datasource only; no application code changes.
+//
+// PostgreSQL via Prisma. Prisma is the persistence abstraction: the
+// application talks to the Prisma client only, so any PostgreSQL
+// provider (managed or self-hosted) works by editing `DATABASE_URL`
+// alone — no application code changes.
 // ================================================================
 
 generator client {

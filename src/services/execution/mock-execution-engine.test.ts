@@ -12,10 +12,10 @@ import {
   ExecutionNotFoundError,
   LearningUnitUnavailableError,
 } from "@/services/execution/execution-errors";
-import { mockExecutionEngine } from "@/services/execution/mock-execution-engine";
+import { mockExecutionEngine } from "@/services/engines";
 import { InvalidExecutionTransitionError } from "@/services/execution/execution-state-machine";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockGoalEngine } from "@/services/engines";
+import { mockRoadmapEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 import type { Roadmap } from "@/types/roadmap";
 
@@ -81,7 +81,11 @@ function passUnit(unitId: string, who: string = studentId): void {
 
 /** Seeds a locked goal + generated roadmap for an arbitrary student id. */
 function seedRoadmapFor(who: string, key: string): Roadmap {
-  const created = mockGoalEngine.createGoal(jsInput(), { studentId: who, idempotencyKey: `${key}-c` });
+  const created = mockGoalEngine.createGoal(jsInput(), {
+    studentId: who,
+    idempotencyKey: `${key}-c`,
+    diagnosisContext: null,
+  });
   const locked = mockGoalEngine.lockGoal(created.goal.id, who, `${key}-l`);
   return mockRoadmapEngine.generateRoadmap(locked.id, who).roadmap;
 }

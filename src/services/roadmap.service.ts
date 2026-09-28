@@ -10,7 +10,7 @@
 
 import { ApiError, USE_MOCK, httpRequest, mockRequest } from "@/lib/api/client";
 import { DependencyCycleError } from "@/services/roadmap/graph";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockRoadmapEngine } from "@/services/engines";
 import { InvalidRoadmapTransitionError } from "@/services/roadmap/roadmap-state-machine";
 import {
   RoadmapGenerationError,

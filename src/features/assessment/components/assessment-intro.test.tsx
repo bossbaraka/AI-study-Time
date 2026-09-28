@@ -10,7 +10,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, type ReactNode } from "react";
 import { AssessmentIntro } from "@/features/assessment/components/assessment-intro";
 import { I18nProvider } from "@/lib/i18n/provider";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
+import { authService } from "@/services/auth.service";
+import { mockAssessmentEngine } from "@/services/engines";
+
+/**
+ * Owner for direct engine calls. Component tests must use the id the
+ * mock auth backend signs in (`usr_student_01`) so the service's
+ * session-resolved student matches the engine's stored owner.
+ */
+const STUDENT = "usr_student_01";
+const STUDENT_EMAIL = "layla.hassan@example.com";
+const PASSWORD = "securePass1";
 
 const { replaceMock, pushMock } = vi.hoisted(() => ({
   replaceMock: vi.fn(),
@@ -55,39 +65,94 @@ function renderIntro() {
 }
 
 describe("AssessmentIntro", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     replaceMock.mockClear();
+    // Assessment is now student-owned: the service resolves the owner
+    // from the session, so the component tests must sign one in.
+    await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
     pushMock.mockClear();
   });
 
   it("explains why, how long and what to expect — without gamification", async () => {
     renderIntro();
 
+    // The discovery screen is the current intended behaviour: it collects
+    // subject + age + stage before generating a tailored diagnostic.
     expect(
       await screen.findByRole("heading", {
         name: /where you are before deciding where you're going/i,
       }),
     ).toBeTruthy();
-    expect(screen.getByText(/not a test you need to fear/i)).toBeTruthy();
     expect(screen.getByText(/calm diagnosis of your current level, not a grade/i)).toBeTruthy();
-    expect(screen.getByText(/Questions adapt to your responses/i)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Begin assessment" })).toBeTruthy();
+    expect(screen.getByText(/Questions that adapt after every answer/i)).toBeTruthy();
+    expect(screen.getByText(/Roughly 13 minutes, at your own pace/i)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Generate Diagnostic Test with AI/i }),
+    ).toBeTruthy();
     // No XP/badges/streaks vocabulary anywhere on the screen.
     expect(document.body.textContent ?? "").not.toMatch(/XP|badge|streak|points/i);
+  });
+
+  it("collects the diagnostic profile before generating a session", async () => {
+    renderIntro();
+
+    expect(
+      await screen.findByRole("textbox", { name: /What do you want to learn\?/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole("spinbutton", { name: /Student Age/i })).toBeTruthy();
+    // All five educational stages are offered; High School is the default.
+    for (const stage of [
+      /Elementary \/ Primary/i,
+      /Middle \/ Intermediate/i,
+      /High School \/ Secondary/i,
+      /University \/ Higher Ed/i,
+      /Self-directed \/ Professional/i,
+    ]) {
+      expect(screen.getByRole("button", { name: stage })).toBeTruthy();
+    }
+  });
+
+  it("refuses to generate a session without a subject", async () => {
+    const user = userEvent.setup();
+    renderIntro();
+
+    await user.click(
+      await screen.findByRole("button", { name: /Generate Diagnostic Test with AI/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByText(/Please specify what you want to learn/i)).toBeTruthy();
+    expect(pushMock).not.toHaveBeenCalled();
   });
 
   it("creates a session and navigates to the runner", async () => {
     const user = userEvent.setup();
     renderIntro();
 
-    await user.click(await screen.findByRole("button", { name: "Begin assessment" }));
+    await user.type(
+      await screen.findByRole("textbox", { name: /What do you want to learn\?/i }),
+      "Mathematics",
+    );
+    await user.click(screen.getByRole("button", { name: /Generate Diagnostic Test with AI/i }));
 
     await waitFor(() => expect(pushMock).toHaveBeenCalledTimes(1));
     expect(pushMock.mock.calls[0]?.[0]).toMatch(/^\/assessment\/session\/asess_/);
   });
 
+  it("lets a quick suggestion fill the subject field", async () => {
+    const user = userEvent.setup();
+    renderIntro();
+
+    const subject = (await screen.findByRole("textbox", {
+      name: /What do you want to learn\?/i,
+    })) as HTMLInputElement;
+    await user.click(screen.getByRole("button", { name: "الرياضيات" }));
+
+    await waitFor(() => expect(subject.value).toBe("الرياضيات"));
+  });
+
   it("offers an unfinished session first so progress is never lost by accident", async () => {
-    let session = mockAssessmentEngine.createSession();
+    let session = mockAssessmentEngine.createSession(STUDENT);
     session = mockAssessmentEngine.submitAnswer({
       sessionId: session.id,
       response: (() => {
@@ -104,7 +169,7 @@ describe("AssessmentIntro", () => {
         return { type: "problem_solving" as const, questionId: q.id, answer: "an answer" };
       })(),
       submissionId: "sub_intro_1",
-    });
+    }, STUDENT);
     renderIntro();
 
     expect(await screen.findByRole("heading", { name: "Continue your assessment" })).toBeTruthy();
@@ -116,7 +181,7 @@ describe("AssessmentIntro", () => {
 
   it("warns before discarding an in-progress session", async () => {
     const user = userEvent.setup();
-    mockAssessmentEngine.createSession();
+    mockAssessmentEngine.createSession(STUDENT);
     renderIntro();
 
     await screen.findByRole("heading", { name: "Continue your assessment" });

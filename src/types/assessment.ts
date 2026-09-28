@@ -180,6 +180,8 @@ export interface AssessmentResult {
 /* ------------------------------------------------------------------ */
 
 export const ASSESSMENT_ERROR_CODES = [
+  "unauthenticated",
+  "forbidden",
   "session_not_found",
   "session_not_active",
   "assessment_not_completed",

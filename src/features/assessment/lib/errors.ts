@@ -19,6 +19,8 @@ export interface NormalizedAssessmentError {
 }
 
 const MESSAGE_KEYS: Record<AssessmentErrorCode, string> = {
+  unauthenticated: "assessment.errors.unauthenticated",
+  forbidden: "assessment.errors.forbidden",
   session_not_found: "assessment.errors.sessionUnavailable",
   session_not_active: "assessment.errors.sessionNotActive",
   assessment_not_completed: "assessment.errors.resultsNotReady",

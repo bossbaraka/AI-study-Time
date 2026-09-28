@@ -7,9 +7,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { authService } from "@/services/auth.service";
 import { ExecutionApiError, executionService } from "@/services/execution.service";
-import { mockExecutionEngine } from "@/services/execution/mock-execution-engine";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockExecutionEngine } from "@/services/engines";
+import { mockGoalEngine } from "@/services/engines";
+import { mockRoadmapEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 import type { Roadmap } from "@/types/roadmap";
 
@@ -41,7 +41,11 @@ let roadmap: Roadmap;
 let firstUnitId: string;
 
 function seedFor(who: string, key: string): Roadmap {
-  const created = mockGoalEngine.createGoal(jsInput(), { studentId: who, idempotencyKey: `${key}-c` });
+  const created = mockGoalEngine.createGoal(jsInput(), {
+    studentId: who,
+    idempotencyKey: `${key}-c`,
+    diagnosisContext: null,
+  });
   const locked = mockGoalEngine.lockGoal(created.goal.id, who, `${key}-l`);
   return mockRoadmapEngine.generateRoadmap(locked.id, who).roadmap;
 }

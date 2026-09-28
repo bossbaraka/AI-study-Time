@@ -239,6 +239,8 @@ export const en = {
   "assessment.errors.saveFailedTitle": "We couldn't save your answer.",
   "assessment.errors.saveFailedBody": "Your progress has not been lost.",
   "assessment.errors.sessionUnavailable": "We couldn't load your assessment.",
+  "assessment.errors.unauthenticated": "Please sign in again to continue your assessment.",
+  "assessment.errors.forbidden": "This assessment belongs to another account.",
   "assessment.errors.sessionNotActive": "This assessment session is no longer active.",
   "assessment.errors.expired": "This assessment session has expired.",
   "assessment.errors.resultsNotReady": "Your results are not ready yet.",

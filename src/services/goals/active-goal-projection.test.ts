@@ -12,7 +12,7 @@ import {
 } from "@/services/goals/active-goal-projection";
 import { goalDiscoveryService } from "@/services/goal-discovery.service";
 import { goalService } from "@/services/journey.service";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockGoalEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 
 const PASSWORD = "securePass1";

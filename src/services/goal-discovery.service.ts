@@ -10,7 +10,7 @@
  */
 
 import { ApiError, USE_MOCK, httpRequest, mockRequest } from "@/lib/api/client";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { assessmentResultSource, mockGoalEngine } from "@/services/engines";
 import { requireStudentId } from "@/services/session-guard";
 import { isGoalErrorCode } from "@/types/goal";
 import type {
@@ -94,7 +94,16 @@ export const goalDiscoveryService = {
     return USE_MOCK
       ? viaMock(async () => {
           const studentId = await requireStudentId();
-          return mockGoalEngine.createGoal(input, { studentId, idempotencyKey });
+          // Resolved here (application layer) through the assessment port —
+          // the client never supplies diagnosis context, and the goal
+          // engine never reaches across a domain boundary itself.
+          const diagnosisContext =
+            await assessmentResultSource.getLatestCompletedResult(studentId);
+          return mockGoalEngine.createGoal(input, {
+            studentId,
+            idempotencyKey,
+            diagnosisContext,
+          });
         })
       : viaHttp(() =>
           httpRequest<GoalWithValidation>("/api/goals", {

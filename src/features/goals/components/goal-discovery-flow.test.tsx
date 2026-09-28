@@ -13,9 +13,9 @@ import { createElement, type ReactNode } from "react";
 import { GoalDiscoveryFlow } from "@/features/goals/components/goal-discovery-flow";
 import { I18nProvider } from "@/lib/i18n/provider";
 import { authService } from "@/services/auth.service";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
+import { mockAssessmentEngine } from "@/services/engines";
 import { GoalApiError, goalDiscoveryService } from "@/services/goal-discovery.service";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockGoalEngine } from "@/services/engines";
 import type { AssessmentResult } from "@/types/assessment";
 import type { GoalDiscoveryInput } from "@/types/goal";
 
@@ -98,6 +98,7 @@ async function seedGoal(
   const created = mockGoalEngine.createGoal(input, {
     studentId,
     idempotencyKey: `seed-${Math.random()}`,
+    diagnosisContext: null,
   });
   if (opts.lock) {
     mockGoalEngine.lockGoal(created.goal.id, studentId, `seed-lock-${Math.random()}`);

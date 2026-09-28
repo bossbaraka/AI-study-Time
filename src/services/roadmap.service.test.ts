@@ -6,9 +6,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { authService } from "@/services/auth.service";
 import { goalDiscoveryService } from "@/services/goal-discovery.service";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockGoalEngine } from "@/services/engines";
 import { RoadmapApiError, roadmapService } from "@/services/roadmap.service";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockRoadmapEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 
 const PASSWORD = "securePass1";
@@ -118,6 +118,7 @@ describe("roadmapService — student flow", () => {
     const foreignGoal = mockGoalEngine.createGoal(jsInput(), {
       studentId: "student_other",
       idempotencyKey: "key-foreign",
+      diagnosisContext: null,
     }).goal;
     const foreignLocked = mockGoalEngine.lockGoal(foreignGoal.id, "student_other", "lock-foreign");
     const foreign = mockRoadmapEngine.generateRoadmap(foreignLocked.id, "student_other").roadmap;

@@ -1,8 +1,11 @@
 /**
- * Gateway integration suite — REAL SQLite (prisma/data/test.db), real
- * scrypt, real sessions/invitations/audit. This is where the official
+ * Gateway integration suite — REAL PostgreSQL (see `src/test/test-env.ts`),
+ * real scrypt, real sessions/invitations/audit. This is where the official
  * rules are proven: invitation-only registration, lockout, suspension
  * killing live sessions, single-use recovery links, audit persistence.
+ *
+ * Requires a disposable test database:
+ *   DATABASE_URL=$DATABASE_URL_TEST npx prisma db push
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";

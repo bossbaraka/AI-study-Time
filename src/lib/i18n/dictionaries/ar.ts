@@ -237,6 +237,8 @@ export const ar: Dictionary = {
   "assessment.errors.saveFailedTitle": "لم نتمكن من حفظ إجابتك.",
   "assessment.errors.saveFailedBody": "لم يضيع تقدّمك.",
   "assessment.errors.sessionUnavailable": "لم نتمكن من تحميل تقييمك.",
+  "assessment.errors.unauthenticated": "يرجى تسجيل الدخول مرة أخرى لمتابعة تقييمك.",
+  "assessment.errors.forbidden": "هذا التقييم يخص حسابًا آخر.",
   "assessment.errors.sessionNotActive": "جلسة التقييم هذه لم تعد نشطة.",
   "assessment.errors.expired": "انتهت صلاحية جلسة التقييم هذه.",
   "assessment.errors.resultsNotReady": "نتائجك ليست جاهزة بعد.",

@@ -13,7 +13,7 @@
  */
 
 import { authService } from "@/services/auth.service";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockGoalEngine } from "@/services/engines";
 import type { Goal } from "@/types/domain";
 import type { LearningGoal } from "@/types/goal";
 

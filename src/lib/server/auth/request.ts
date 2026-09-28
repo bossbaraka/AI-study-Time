@@ -7,6 +7,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/server/db";
+import { ApiError } from "@/lib/api/client";
 import { AuthGatewayError, createGateway, SESSION_TTL_SEC } from "@/lib/server/auth/gateway";
 import type { AuthUser } from "@/types/auth";
 
@@ -75,6 +76,13 @@ export async function errorResponse(error: unknown): Promise<NextResponse> {
   if (error instanceof AuthGatewayError) {
     return NextResponse.json({ code: error.code }, { status: error.status });
   }
+  // Domain engines throw `ApiError` carrying a stable, non-sensitive code
+  // and the HTTP status it maps to. The message is never forwarded — only
+  // the code crosses the boundary.
+  if (error instanceof ApiError) {
+    const status = error.status >= 400 && error.status <= 599 ? error.status : 500;
+    return NextResponse.json({ code: error.code ?? "unknown" }, { status });
+  }
   // Anything else is an internal failure: log server-side, never forward.
   console.error("[auth-gateway] unexpected error:", error instanceof Error ? error.name : error);
   return NextResponse.json({ code: "unknown" }, { status: 500 });
@@ -125,6 +133,20 @@ export async function requireAdminApi(): Promise<AuthUser> {
 }
 
 /**
+ * API gate: returns the signed-in STUDENT or throws a typed 401/403.
+ *
+ * This is the ownership anchor for every student-owned resource: handlers
+ * receive the id from the session cookie, so a crafted request can never
+ * name another student.
+ */
+export async function requireStudentApi(): Promise<AuthUser> {
+  const user = await serverUser();
+  if (!user) throw new AuthGatewayError("session_expired", 401);
+  if (user.role !== "student") throw new AuthGatewayError("forbidden", 403);
+  return user;
+}
+
+/**
  * Standard admin route wrapper: CSRF check for writes, real session →
  * role check, typed error funnel. The only place admin handlers begin.
  */
@@ -136,6 +158,24 @@ export async function withAdmin(
   try {
     const admin = await requireAdminApi();
     return await fn(admin);
+  } catch (error) {
+    return await errorResponse(error);
+  }
+}
+
+/**
+ * Standard student route wrapper: CSRF check for writes, real session →
+ * student role check, typed error funnel. Domain errors thrown by an
+ * engine (`ApiError`) are mapped by the caller-supplied `toStatus`.
+ */
+export async function withStudent(
+  req: Request,
+  fn: (student: AuthUser) => Promise<NextResponse>,
+): Promise<NextResponse> {
+  if (csrfRejected(req)) return forbiddenResponse();
+  try {
+    const student = await requireStudentApi();
+    return await fn(student);
   } catch (error) {
     return await errorResponse(error);
   }

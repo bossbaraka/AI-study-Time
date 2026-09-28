@@ -4,10 +4,9 @@
  * directly — the engine has zero React dependencies.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
-import type { GoalDiscoveryInput, GoalIssueCode } from "@/types/goal";
+import { beforeEach, describe, expect, it } from "vitest";
+import { mockGoalEngine } from "@/services/engines";
+import type { GoalDiscoveryInput, GoalIssueCode, GoalWithValidation } from "@/types/goal";
 
 const STUDENT = "student_01";
 
@@ -26,8 +25,16 @@ function strongInput(overrides: Partial<GoalDiscoveryInput> = {}): GoalDiscovery
   };
 }
 
-function create(input: GoalDiscoveryInput, key = "key-create") {
-  return mockGoalEngine.createGoal(input, { studentId: STUDENT, idempotencyKey: key });
+function create(
+  input: GoalDiscoveryInput,
+  key = "key-create",
+  diagnosisContext: GoalWithValidation["goal"]["diagnosisContext"] = null,
+) {
+  return mockGoalEngine.createGoal(input, {
+    studentId: STUDENT,
+    idempotencyKey: key,
+    diagnosisContext,
+  });
 }
 
 function issueCodes(codes: { code: GoalIssueCode }[]): GoalIssueCode[] {
@@ -36,7 +43,6 @@ function issueCodes(codes: { code: GoalIssueCode }[]): GoalIssueCode[] {
 
 beforeEach(() => {
   mockGoalEngine.__reset();
-  mockAssessmentEngine.__reset();
 });
 
 describe("engine — goal creation", () => {
@@ -60,14 +66,24 @@ describe("engine — goal creation", () => {
     expect(goal.desiredOutcome).toBe(outcome.trim());
   });
 
-  it("attaches the latest diagnosis engine-side (client never supplies it)", () => {
-    const diagnosis = { id: "result_01", studentId: STUDENT };
-    const spy = vi
-      .spyOn(mockAssessmentEngine, "getLatestCompletedResult")
-      .mockReturnValue(diagnosis as never);
-    const { goal } = create(strongInput());
+  it("stores the diagnosis snapshot the application layer resolved", () => {
+    const diagnosis = {
+      sessionId: "asess_01",
+      completedAt: "2026-01-01T00:00:00.000Z",
+      questionsAnswered: 10,
+      strengths: [],
+      developingAreas: [],
+      knowledgeGaps: [],
+      recommendedStartingPoint: null,
+      confidence: "high" as const,
+    };
+    const { goal } = create(strongInput(), "key-diag", diagnosis);
     expect(goal.diagnosisContext).toEqual(diagnosis);
-    spy.mockRestore();
+  });
+
+  it("records no diagnosis when the student has completed no assessment", () => {
+    const { goal } = create(strongInput());
+    expect(goal.diagnosisContext).toBeNull();
   });
 
   it("is idempotent: replaying the same key returns the original goal", () => {

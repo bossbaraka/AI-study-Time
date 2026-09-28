@@ -13,10 +13,10 @@ import { createElement, type ReactNode } from "react";
 import { RoadmapFlow } from "@/features/roadmap/components/roadmap-flow";
 import { I18nProvider } from "@/lib/i18n/provider";
 import { authService } from "@/services/auth.service";
-import { mockExecutionEngine } from "@/services/execution/mock-execution-engine";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockExecutionEngine } from "@/services/engines";
+import { mockGoalEngine } from "@/services/engines";
 import { RoadmapApiError } from "@/services/roadmap.service";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockRoadmapEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 
 const { replaceMock } = vi.hoisted(() => ({ replaceMock: vi.fn() }));
@@ -82,6 +82,7 @@ async function lockGoal(input: GoalDiscoveryInput = jsInput()): Promise<string> 
   const created = mockGoalEngine.createGoal(input, {
     studentId,
     idempotencyKey: `seed-${Math.random()}`,
+    diagnosisContext: null,
   });
   const locked = mockGoalEngine.lockGoal(created.goal.id, studentId, `seed-lock-${Math.random()}`);
   return locked.id;
@@ -106,7 +107,7 @@ describe("/roadmap — routing contract (§21)", () => {
   it("redirects to /goals when the goal is not locked", async () => {
     mockGoalEngine.createGoal(
       jsInput({ desiredOutcome: "I want to learn more about JavaScript overall" }),
-      { studentId, idempotencyKey: "seed-unlocked" },
+      { studentId, idempotencyKey: "seed-unlocked", diagnosisContext: null },
     );
     renderFlow();
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/goals"));

@@ -4,10 +4,12 @@
  * quality gate, idempotency, versioning, ownership.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
-import { ENGINE_VERSION, mockRoadmapEngine, validateRoadmapStructure } from "@/services/roadmap/mock-roadmap-engine";
+import { beforeEach, describe, expect, it } from "vitest";
+import { mockGoalEngine, mockRoadmapEngine } from "@/services/engines";
+import {
+  ENGINE_VERSION,
+  validateRoadmapStructure,
+} from "@/services/roadmap/mock-roadmap-engine";
 import { RoadmapGenerationError, RoadmapOwnershipError, RoadmapValidationError } from "@/services/roadmap/roadmap-errors";
 import { InvalidRoadmapTransitionError } from "@/services/roadmap/roadmap-state-machine";
 import { currentMilestone } from "@/features/roadmap/lib/current-milestone";
@@ -36,10 +38,12 @@ function jsInput(overrides: Partial<GoalDiscoveryInput> = {}): GoalDiscoveryInpu
 function lockedGoal(
   input: GoalDiscoveryInput = jsInput(),
   studentId: string = STUDENT,
+  diagnosisContext: AssessmentResult | null = null,
 ): LearningGoal {
   const { goal } = mockGoalEngine.createGoal(input, {
     studentId,
     idempotencyKey: `key-${Math.random()}`,
+    diagnosisContext,
   });
   return mockGoalEngine.lockGoal(goal.id, studentId, `lock-${Math.random()}`);
 }
@@ -58,16 +62,16 @@ function diagnosis(overrides: Partial<AssessmentResult> = {}): AssessmentResult 
   };
 }
 
+/**
+ * The diagnosis now travels as goal-creation input (resolved by the
+ * application layer), so the roadmap test no longer needs to reach into
+ * the assessment engine at all.
+ */
 function lockedGoalWithDiagnosis(
   result: AssessmentResult,
   input: GoalDiscoveryInput = jsInput(),
 ): LearningGoal {
-  const spy = vi
-    .spyOn(mockAssessmentEngine, "getLatestCompletedResult")
-    .mockReturnValue(result);
-  const goal = lockedGoal(input);
-  spy.mockRestore();
-  return goal;
+  return lockedGoal(input, STUDENT, result);
 }
 
 function lockedGoalWithDiagnosisInput(
@@ -84,7 +88,6 @@ function milestoneTitles(roadmap: Roadmap): string[] {
 beforeEach(() => {
   mockRoadmapEngine.__reset();
   mockGoalEngine.__reset();
-  mockAssessmentEngine.__reset();
 });
 
 describe("engine — generation from a locked goal", () => {
@@ -142,7 +145,7 @@ describe("engine — generation from a locked goal", () => {
   it("refuses to generate without a locked goal", () => {
     const { goal } = mockGoalEngine.createGoal(
       jsInput({ desiredOutcome: "I want to learn more about JavaScript overall" }),
-      { studentId: STUDENT, idempotencyKey: "key-unlocked" },
+      { studentId: STUDENT, idempotencyKey: "key-unlocked", diagnosisContext: null },
     );
     expect(goal.status).not.toBe("locked");
     expect(() => mockRoadmapEngine.generateRoadmap(goal.id, STUDENT)).toThrow(

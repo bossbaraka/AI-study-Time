@@ -14,9 +14,9 @@ import { LearnIndexFlow } from "@/features/execution/components/learn-index-flow
 import { UnitLearnFlow } from "@/features/execution/components/unit-learn-flow";
 import { I18nProvider } from "@/lib/i18n/provider";
 import { authService } from "@/services/auth.service";
-import { mockExecutionEngine } from "@/services/execution/mock-execution-engine";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockExecutionEngine } from "@/services/engines";
+import { mockGoalEngine } from "@/services/engines";
+import { mockRoadmapEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 import type { Roadmap } from "@/types/roadmap";
 
@@ -85,6 +85,7 @@ async function seedRoadmap(): Promise<void> {
   const created = mockGoalEngine.createGoal(jsInput(), {
     studentId,
     idempotencyKey: `ui-${Math.random()}`,
+    diagnosisContext: null,
   });
   const locked = mockGoalEngine.lockGoal(created.goal.id, studentId, `ui-lock-${Math.random()}`);
   roadmap = mockRoadmapEngine.generateRoadmap(locked.id, studentId).roadmap;

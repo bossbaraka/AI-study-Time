@@ -18,7 +18,7 @@ import {
   ExecutionUnauthorizedError,
   LearningUnitUnavailableError,
 } from "@/services/execution/execution-errors";
-import { mockExecutionEngine } from "@/services/execution/mock-execution-engine";
+import { mockExecutionEngine } from "@/services/engines";
 import { InvalidExecutionTransitionError } from "@/services/execution/execution-state-machine";
 import { requireStudentId } from "@/services/session-guard";
 import type {

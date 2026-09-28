@@ -1,16 +1,20 @@
 /**
- * Mock adaptive assessment engine — the simulated backend.
+ * Adaptive assessment engine — the assessment domain's orchestrator.
  *
- * This module is the ONLY place assessment "intelligence" exists in the
- * mock phase: question selection, answer evaluation, difficulty
- * adaptation, topic coverage, completion detection and diagnostic
- * synthesis. When the real AI service arrives, it replaces this module
- * behind the identical `assessment.service.ts` contract; no UI changes.
+ * This module holds the assessment "intelligence": question selection,
+ * answer evaluation, difficulty adaptation, topic coverage, completion
+ * detection and diagnostic synthesis. It is deterministic and framework
+ * free.
  *
  * Boundaries respected:
- * - Scoring data never leaves this module (bank items stay server-side).
- * - Submissions are idempotent via client `submissionId` (§16).
- * - Sessions persist to localStorage like the mock auth backend does.
+ * - Storage is reached ONLY through the injected `AssessmentSessionStore`
+ *   port — no `window`, no `localStorage`, no Prisma, no HTTP.
+ * - Scoring data never leaves this module. `BankItem.scoring` stays on
+ *   the stored session; `toClientSession` emits questions only.
+ * - Every session is owned by a `studentId` resolved by the CALLER from
+ *   the authenticated session. A session belonging to another student is
+ *   indistinguishable from a missing one (404) — existence never leaks.
+ * - Submissions are idempotent via the client's `submissionId`.
  */
 
 import { ApiError } from "@/lib/api/client";
@@ -21,6 +25,11 @@ import {
   type BankItem,
 } from "@/services/assessment/question-bank";
 import type {
+  AssessmentSessionStore,
+  StoredAssessmentSession,
+  StoredTopicState,
+} from "@/services/ports/stores";
+import type {
   AdaptationNote,
   AssessmentDifficulty,
   AssessmentProgress,
@@ -28,7 +37,6 @@ import type {
   AssessmentResponse,
   AssessmentResult,
   AssessmentSession,
-  AssessmentStatus,
   AssessmentTopicId,
   DiagnosticConfidence,
   InsightCode,
@@ -39,10 +47,9 @@ import type {
 } from "@/types/assessment";
 
 /* ------------------------------------------------------------------ */
-/* Engine configuration (backend-side; never rendered)                  */
+/* Engine configuration (server-side; never rendered)                  */
 /* ------------------------------------------------------------------ */
 
-const STORAGE_KEY = "mureeh.mock.assessment.v1";
 const MIN_QUESTIONS = 8;
 const MAX_QUESTIONS = 13;
 const EXPECTED_QUESTIONS = 10;
@@ -50,88 +57,44 @@ const AVG_SECONDS_PER_QUESTION = 75;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 /* ------------------------------------------------------------------ */
-/* Internal state                                                      */
+/* Engine wiring                                                       */
 /* ------------------------------------------------------------------ */
 
-interface ScoredResponse {
-  submissionId: string;
-  response: AssessmentResponse;
-  /** 1 = correct, 0.5 = partial (reasoning credit / keyword near-miss), 0 = incorrect. */
-  points: number;
-  difficulty: AssessmentDifficulty;
-  questionType: AssessmentQuestion["type"];
-  at: string;
+export interface AssessmentEngineDeps {
+  sessions: AssessmentSessionStore;
 }
 
-interface TopicState {
-  asked: number;
-  points: number;
-  lastDifficulty: AssessmentDifficulty | null;
-  lastPoints: number | null;
-}
+/** Engine-local alias — the persisted aggregate. */
+type Session = StoredAssessmentSession;
 
-interface EngineSession {
-  id: string;
-  status: Exclude<AssessmentStatus, "not_started">;
-  startedAt: string;
-  completedAt?: string;
-  responses: ScoredResponse[];
-  topics: Record<AssessmentTopicId, TopicState>;
-  lastTopic: AssessmentTopicId | null;
-  profile?: StudentAssessmentProfile;
-  customBank?: BankItem[];
-  customTopics?: AssessmentTopicId[];
-}
-
-function emptyTopicState(): TopicState {
+function emptyTopicState(): StoredTopicState {
   return { asked: 0, points: 0, lastDifficulty: null, lastPoints: null };
 }
 
-function emptyTopics(customTopics?: AssessmentTopicId[]): Record<AssessmentTopicId, TopicState> {
-  const topics = {} as Record<AssessmentTopicId, TopicState>;
-  const list = customTopics ?? ASSESSMENT_TOPICS;
-  for (const topic of list) topics[topic] = emptyTopicState();
+function emptyTopics(customTopics?: AssessmentTopicId[]): Record<string, StoredTopicState> {
+  const topics: Record<string, StoredTopicState> = {};
+  for (const topic of customTopics ?? ASSESSMENT_TOPICS) topics[topic] = emptyTopicState();
   return topics;
 }
 
-function findItem(session: EngineSession, questionId: string): BankItem | undefined {
-  if (session.customBank) {
-    const custom = session.customBank.find((b) => b.question.id === questionId);
+function topicsOf(session: Session): AssessmentTopicId[] {
+  return session.sessionTopics ?? ASSESSMENT_TOPICS;
+}
+
+function bankOf(session: Session): BankItem[] {
+  return session.bank ?? QUESTION_BANK;
+}
+
+function findItem(session: Session, questionId: string): BankItem | undefined {
+  if (session.bank) {
+    const custom = session.bank.find((b) => b.question.id === questionId);
     if (custom) return custom;
   }
   return findBankItem(questionId);
 }
 
 /* ------------------------------------------------------------------ */
-/* Persistence (guarded; falls back to memory-only)                    */
-/* ------------------------------------------------------------------ */
-
-let memoryStore: EngineSession[] = [];
-
-function loadSessions(): EngineSession[] {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return memoryStore;
-    const parsed = JSON.parse(raw) as EngineSession[];
-    if (!Array.isArray(parsed)) return memoryStore;
-    memoryStore = parsed;
-    return memoryStore;
-  } catch {
-    return memoryStore;
-  }
-}
-
-function saveSessions(sessions: EngineSession[]): void {
-  memoryStore = sessions;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
-  } catch {
-    // Storage unavailable (private mode): memory-only is acceptable for the mock.
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Scoring (engine-internal)                                           */
+/* Scoring (engine-internal — never exposed)                           */
 /* ------------------------------------------------------------------ */
 
 function scoreResponse(item: BankItem, response: AssessmentResponse): number {
@@ -164,11 +127,10 @@ function scoreResponse(item: BankItem, response: AssessmentResponse): number {
 
 const DIFFICULTY_ORDER: AssessmentDifficulty[] = ["foundational", "intermediate", "advanced"];
 
-function pickTopic(session: EngineSession): AssessmentTopicId {
+function pickTopic(session: Session): AssessmentTopicId {
   // Coverage first: the least-explored topic wins; ties break toward the
   // topic whose last answer was correct (momentum) then declaration order.
-  const topicsList = session.customTopics ?? ASSESSMENT_TOPICS;
-  const ranked = [...topicsList].sort((a, b) => {
+  const ranked = [...topicsOf(session)].sort((a, b) => {
     const ta = session.topics[a] ?? emptyTopicState();
     const tb = session.topics[b] ?? emptyTopicState();
     if (ta.asked !== tb.asked) return ta.asked - tb.asked;
@@ -182,7 +144,7 @@ function pickTopic(session: EngineSession): AssessmentTopicId {
   return top;
 }
 
-function pickDifficulty(session: EngineSession, topic: AssessmentTopicId): AssessmentDifficulty {
+function pickDifficulty(session: Session, topic: AssessmentTopicId): AssessmentDifficulty {
   const state = session.topics[topic] ?? emptyTopicState();
   if (state.lastDifficulty === null || state.lastPoints === null) return "foundational";
   const index = DIFFICULTY_ORDER.indexOf(state.lastDifficulty);
@@ -196,12 +158,12 @@ function pickDifficulty(session: EngineSession, topic: AssessmentTopicId): Asses
 }
 
 function pickQuestion(
-  session: EngineSession,
+  session: Session,
 ): { item: BankItem; note: AdaptationNote } | null {
   const askedIds = new Set(session.responses.map((r) => r.response.questionId));
   const topic = pickTopic(session);
   const difficulty = pickDifficulty(session, topic);
-  const bank = session.customBank ?? QUESTION_BANK;
+  const bank = bankOf(session);
 
   const topicCandidates = bank.filter(
     (item) => item.question.topic === topic && !askedIds.has(item.question.id),
@@ -230,22 +192,21 @@ function pickQuestion(
 /* Completion + progress                                               */
 /* ------------------------------------------------------------------ */
 
-function shouldComplete(session: EngineSession): boolean {
-  const bank = session.customBank ?? QUESTION_BANK;
+function shouldComplete(session: Session): boolean {
+  const bank = bankOf(session);
   const maxQuestions = Math.min(MAX_QUESTIONS, bank.length);
   const minQuestions = Math.min(MIN_QUESTIONS, Math.max(3, Math.floor(bank.length * 0.7)));
   const answered = session.responses.length;
   if (answered >= maxQuestions) return true;
   if (answered < minQuestions) return false;
-  const topicsList = session.customTopics ?? ASSESSMENT_TOPICS;
-  return topicsList.every((topic) => (session.topics[topic]?.asked ?? 0) >= 2);
+  return topicsOf(session).every((topic) => (session.topics[topic]?.asked ?? 0) >= 2);
 }
 
-function buildProgress(session: EngineSession): AssessmentProgress {
-  const topicsList = session.customTopics ?? ASSESSMENT_TOPICS;
+function buildProgress(session: Session): AssessmentProgress {
+  const list = topicsOf(session);
   const answered = session.responses.length;
-  const topicsExplored = topicsList.filter((t) => (session.topics[t]?.asked ?? 0) > 0).length;
-  const expectedCount = Math.min(EXPECTED_QUESTIONS, (session.customBank ?? QUESTION_BANK).length);
+  const topicsExplored = list.filter((t) => (session.topics[t]?.asked ?? 0) > 0).length;
+  const expectedCount = Math.min(EXPECTED_QUESTIONS, bankOf(session).length);
   const remainingQuestions = Math.max(0, expectedCount - answered);
   const estimatedMinutesRemaining =
     session.status === "completed"
@@ -258,18 +219,23 @@ function buildProgress(session: EngineSession): AssessmentProgress {
   return {
     questionsAnswered: answered,
     topicsExplored,
-    totalTopics: topicsList.length,
+    totalTopics: list.length,
     estimatedMinutesRemaining,
     estimatedCompletionPercent,
   };
 }
 
+/**
+ * The client-safe projection. Deliberately excludes `bank`, `topics`,
+ * `responses[].points` and every other piece of scoring data — the
+ * answer key never crosses this boundary.
+ */
 function toClientSession(
-  session: EngineSession,
+  session: Session,
   currentQuestion: AssessmentQuestion | null,
   adaptationNote?: AdaptationNote,
 ): AssessmentSession {
-  const bank = session.customBank ?? QUESTION_BANK;
+  const bank = bankOf(session);
   const expectedCount = Math.min(EXPECTED_QUESTIONS, bank.length);
   return {
     id: session.id,
@@ -283,7 +249,7 @@ function toClientSession(
   };
 }
 
-function currentQuestionFor(session: EngineSession): AssessmentQuestion | null {
+function currentQuestionFor(session: Session): AssessmentQuestion | null {
   if (session.status === "completed" || session.status === "expired") return null;
   const picked = pickQuestion(session);
   return picked ? cloneQuestion(picked.item.question) : null;
@@ -299,7 +265,7 @@ function cloneQuestion(question: AssessmentQuestion): AssessmentQuestion {
 
 function categorizeTopic(
   topic: AssessmentTopicId,
-  session: EngineSession,
+  session: Session,
 ): LearningInsight | null {
   const state = session.topics[topic];
   if (!state || state.asked === 0) return null;
@@ -311,7 +277,11 @@ function categorizeTopic(
   let insight: InsightCode;
   if (state.asked >= 2 && rate >= 0.7) {
     const appliedCorrect = topicResponses.some(
-      (r) => r.points >= 1 && (r.questionType === "scenario" || r.questionType === "problem_solving" || r.difficulty === "advanced"),
+      (r) =>
+        r.points >= 1 &&
+        (r.questionType === "scenario" ||
+          r.questionType === "problem_solving" ||
+          r.difficulty === "advanced"),
     );
     insight = appliedCorrect ? "strong_applied" : "strong_conceptual";
   } else if (rate < 0.4) {
@@ -322,13 +292,15 @@ function categorizeTopic(
   return { topic, insight, basedOnResponses: state.asked };
 }
 
-function synthesizeResult(session: EngineSession): AssessmentResult {
-  const topicsList = session.customTopics ?? ASSESSMENT_TOPICS;
-  const insights = topicsList.map((topic) => categorizeTopic(topic, session)).filter(
-    (insight): insight is LearningInsight => insight !== null,
-  );
+function synthesizeResult(session: Session): AssessmentResult {
+  const list = topicsOf(session);
+  const insights = list
+    .map((topic) => categorizeTopic(topic, session))
+    .filter((insight): insight is LearningInsight => insight !== null);
 
-  const strengths = insights.filter((i) => i.insight === "strong_conceptual" || i.insight === "strong_applied");
+  const strengths = insights.filter(
+    (i) => i.insight === "strong_conceptual" || i.insight === "strong_applied",
+  );
   const knowledgeGaps = insights.filter((i) => i.insight === "conceptual_gap");
   const developingAreas = insights.filter((i) => i.insight === "fundamentals_need_practice");
 
@@ -337,8 +309,8 @@ function synthesizeResult(session: EngineSession): AssessmentResult {
     return !state || state.asked === 0 ? 1 : state.points / state.asked;
   };
 
-  const weakestOf = (insights: LearningInsight[]): LearningInsight | undefined =>
-    [...insights].sort((a, b) => rateFor(a.topic) - rateFor(b.topic))[0];
+  const weakestOf = (items: LearningInsight[]): LearningInsight | undefined =>
+    [...items].sort((a, b) => rateFor(a.topic) - rateFor(b.topic))[0];
 
   let recommendedStartingPoint: RecommendedStartingPoint | null = null;
   const weakestGap = weakestOf(knowledgeGaps);
@@ -353,9 +325,9 @@ function synthesizeResult(session: EngineSession): AssessmentResult {
   }
 
   const answered = session.responses.length;
-  const topicsExplored = topicsList.filter((t) => (session.topics[t]?.asked ?? 0) > 0).length;
+  const topicsExplored = list.filter((t) => (session.topics[t]?.asked ?? 0) > 0).length;
   let confidence: DiagnosticConfidence = "low";
-  if (answered >= 6 && topicsExplored === topicsList.length) confidence = "high";
+  if (answered >= 6 && topicsExplored === list.length) confidence = "high";
   else if (answered >= 4) confidence = "medium";
 
   return {
@@ -371,27 +343,14 @@ function synthesizeResult(session: EngineSession): AssessmentResult {
 }
 
 /* ------------------------------------------------------------------ */
-/* Public engine API (consumed only by assessment.service.ts)          */
+/* The engine                                                          */
 /* ------------------------------------------------------------------ */
 
 function fail(status: number, code: string, message = code): never {
   throw new ApiError(message, status, code);
 }
 
-function mutateSession(
-  id: string,
-  mutate: (session: EngineSession, sessions: EngineSession[]) => void,
-): EngineSession {
-  const sessions = loadSessions();
-  const session = sessions.find((s) => s.id === id);
-  if (!session) fail(404, "session_not_found");
-  expireIfNeeded(session);
-  mutate(session, sessions);
-  saveSessions(sessions);
-  return session;
-}
-
-function expireIfNeeded(session: EngineSession): void {
+function expireIfNeeded(session: Session): void {
   if (session.status === "completed" || session.status === "expired") return;
   if (Date.now() - new Date(session.startedAt).getTime() > SESSION_TTL_MS) {
     session.status = "expired";
@@ -406,172 +365,177 @@ function newSessionId(): string {
   return `asess_${random}`;
 }
 
-export const mockAssessmentEngine = {
-  createSession(
-    profile?: StudentAssessmentProfile,
-    customData?: { bank: BankItem[]; topics: string[] },
-  ): AssessmentSession {
-    const sessions = loadSessions();
-    // A brand-new session supersedes any unfinished one (the UI warns first).
-    for (const existing of sessions) {
-      if (existing.status === "in_progress" || existing.status === "paused") {
-        existing.status = "expired";
+/**
+ * Ownership gate. A foreign session is reported exactly like a missing
+ * one so existence is never leaked across students.
+ */
+function ownSession(
+  store: AssessmentSessionStore,
+  sessionId: string,
+  studentId: string,
+): Session {
+  const session = store.findById(sessionId);
+  if (!session || session.studentId !== studentId) fail(404, "session_not_found");
+  expireIfNeeded(session);
+  return session;
+}
+
+export function createAssessmentEngine(deps: AssessmentEngineDeps) {
+  const { sessions: store } = deps;
+
+  return {
+    createSession(
+      studentId: string,
+      profile?: StudentAssessmentProfile,
+      customData?: { bank: BankItem[]; topics: string[] },
+    ): AssessmentSession {
+      // A brand-new session supersedes any unfinished one OF THIS STUDENT
+      // (the UI warns first). Other students are never touched.
+      for (const existing of store.listByStudent(studentId)) {
+        if (existing.status === "in_progress" || existing.status === "paused") {
+          existing.status = "expired";
+          store.upsert(existing);
+        }
       }
-    }
-    const topicsList = customData?.topics ?? ASSESSMENT_TOPICS;
-    const session: EngineSession = {
-      id: newSessionId(),
-      status: "in_progress",
-      startedAt: new Date().toISOString(),
-      responses: [],
-      topics: emptyTopics(topicsList),
-      lastTopic: null,
-      profile,
-      customBank: customData?.bank,
-      customTopics: topicsList,
-    };
-    sessions.push(session);
-    saveSessions(sessions);
-    const picked = pickQuestion(session);
-    return toClientSession(session, picked ? cloneQuestion(picked.item.question) : null);
-  },
+      const topicsList = customData?.topics ?? ASSESSMENT_TOPICS;
+      const session: Session = {
+        id: newSessionId(),
+        studentId,
+        status: "in_progress",
+        startedAt: new Date().toISOString(),
+        responses: [],
+        topics: emptyTopics(topicsList),
+        lastTopic: null,
+        ...(profile ? { profile } : {}),
+        ...(customData?.bank ? { bank: customData.bank } : {}),
+        sessionTopics: topicsList,
+      };
+      store.upsert(session);
+      const picked = pickQuestion(session);
+      return toClientSession(session, picked ? cloneQuestion(picked.item.question) : null);
+    },
 
-  getActiveSession(): AssessmentSession | null {
-    const sessions = loadSessions();
-    const active = sessions
-      .filter((s) => s.status === "in_progress" || s.status === "paused")
-      .filter((s) => {
-        expireIfNeeded(s);
-        return s.status === "in_progress" || s.status === "paused";
-      })
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
-    if (!active) return null;
-    saveSessions(sessions);
-    return toClientSession(active, currentQuestionFor(active));
-  },
+    getActiveSession(studentId: string): AssessmentSession | null {
+      let active: Session | undefined;
+      for (const session of store.listByStudent(studentId)) {
+        expireIfNeeded(session);
+        if (session.status !== "in_progress" && session.status !== "paused") continue;
+        if (!active || session.startedAt > active.startedAt) active = session;
+      }
+      return active ? toClientSession(active, currentQuestionFor(active)) : null;
+    },
 
-  getSession(sessionId: string): AssessmentSession {
-    const sessions = loadSessions();
-    const session = sessions.find((s) => s.id === sessionId);
-    if (!session) fail(404, "session_not_found");
-    expireIfNeeded(session);
-    saveSessions(sessions);
-    return toClientSession(session, currentQuestionFor(session));
-  },
-
-  submitAnswer(payload: SubmitAnswerPayload): AssessmentSession {
-    const { sessionId, response, submissionId } = payload;
-    const sessions = loadSessions();
-    const session = sessions.find((s) => s.id === sessionId);
-    if (!session) fail(404, "session_not_found");
-    expireIfNeeded(session);
-    if (session.status !== "in_progress") fail(409, "session_not_active");
-
-    // Idempotency: an already-accepted submissionId returns current state
-    // without re-evaluating — safe retries after network failures.
-    if (session.responses.some((r) => r.submissionId === submissionId)) {
-      saveSessions(sessions);
+    getSession(sessionId: string, studentId: string): AssessmentSession {
+      const session = ownSession(store, sessionId, studentId);
       return toClientSession(session, currentQuestionFor(session));
-    }
+    },
 
-    const item = findItem(session, response.questionId);
-    if (!item) fail(422, "invalid_response");
-    const expected = currentQuestionFor(session);
-    if (!expected || expected.id !== response.questionId) fail(422, "invalid_response");
-    if (item.question.type !== response.type) fail(422, "invalid_response");
+    submitAnswer(payload: SubmitAnswerPayload, studentId: string): AssessmentSession {
+      const { sessionId, response, submissionId } = payload;
+      const session = ownSession(store, sessionId, studentId);
+      if (session.status !== "in_progress") fail(409, "session_not_active");
 
-    const points = scoreResponse(item, response);
-    session.responses.push({
-      submissionId,
-      response,
-      points,
-      difficulty: item.question.difficulty,
-      questionType: item.question.type,
-      at: new Date().toISOString(),
-    });
+      // Idempotency: an already-accepted submissionId returns current state
+      // without re-evaluating — safe retries after network failures.
+      if (session.responses.some((r) => r.submissionId === submissionId)) {
+        return toClientSession(session, currentQuestionFor(session));
+      }
 
-    let topicState = session.topics[item.question.topic];
-    if (!topicState) {
-      topicState = emptyTopicState();
+      const item = findItem(session, response.questionId);
+      if (!item) fail(422, "invalid_response");
+      const expected = currentQuestionFor(session);
+      if (!expected || expected.id !== response.questionId) fail(422, "invalid_response");
+      if (item.question.type !== response.type) fail(422, "invalid_response");
+
+      const points = scoreResponse(item, response);
+      session.responses.push({
+        submissionId,
+        response,
+        points,
+        difficulty: item.question.difficulty,
+        questionType: item.question.type,
+        at: new Date().toISOString(),
+      });
+
+      const topicState = session.topics[item.question.topic] ?? emptyTopicState();
+      topicState.asked += 1;
+      topicState.points += points;
+      topicState.lastDifficulty = item.question.difficulty;
+      topicState.lastPoints = points;
       session.topics[item.question.topic] = topicState;
-    }
-    topicState.asked += 1;
-    topicState.points += points;
-    topicState.lastDifficulty = item.question.difficulty;
-    topicState.lastPoints = points;
-    session.lastTopic = item.question.topic;
+      session.lastTopic = item.question.topic;
 
-    if (shouldComplete(session)) {
+      if (shouldComplete(session)) {
+        session.status = "completed";
+        session.completedAt = new Date().toISOString();
+        store.upsert(session);
+        return toClientSession(session, null);
+      }
+
+      const picked = pickQuestion(session);
+      store.upsert(session);
+      return toClientSession(
+        session,
+        picked ? cloneQuestion(picked.item.question) : null,
+        picked?.note,
+      );
+    },
+
+    pauseSession(sessionId: string, studentId: string): AssessmentSession {
+      const session = ownSession(store, sessionId, studentId);
+      if (session.status !== "in_progress") fail(409, "session_not_active");
+      session.status = "paused";
+      store.upsert(session);
+      return toClientSession(session, null);
+    },
+
+    resumeSession(sessionId: string, studentId: string): AssessmentSession {
+      const session = ownSession(store, sessionId, studentId);
+      if (session.status === "completed" || session.status === "expired") {
+        fail(409, "session_not_active");
+      }
+      session.status = "in_progress";
+      store.upsert(session);
+      return toClientSession(session, currentQuestionFor(session));
+    },
+
+    completeSession(sessionId: string, studentId: string): AssessmentSession {
+      const session = ownSession(store, sessionId, studentId);
+      if (session.status !== "in_progress" && session.status !== "paused") {
+        fail(409, "session_not_active");
+      }
       session.status = "completed";
       session.completedAt = new Date().toISOString();
-      saveSessions(sessions);
+      store.upsert(session);
       return toClientSession(session, null);
-    }
+    },
 
-    const picked = pickQuestion(session);
-    saveSessions(sessions);
-    return toClientSession(
-      session,
-      picked ? cloneQuestion(picked.item.question) : null,
-      picked?.note,
-    );
-  },
+    getResults(sessionId: string, studentId: string): AssessmentResult {
+      const session = ownSession(store, sessionId, studentId);
+      if (session.status !== "completed") fail(409, "assessment_not_completed");
+      return synthesizeResult(session);
+    },
 
-  pauseSession(sessionId: string): AssessmentSession {
-    const session = mutateSession(sessionId, (s) => {
-      if (s.status !== "in_progress") fail(409, "session_not_active");
-      s.status = "paused";
-    });
-    return toClientSession(session, null);
-  },
+    /**
+     * Most recent completed assessment result for THIS student, or null.
+     * Consumed by the goal engine so diagnosis context is resolved from
+     * the owner's own history — never carried by the client.
+     */
+    getLatestCompletedResult(studentId: string): AssessmentResult | null {
+      const completed = store
+        .listByStudent(studentId)
+        .filter((s) => s.status === "completed")
+        .sort((a, b) =>
+          (b.completedAt ?? b.startedAt).localeCompare(a.completedAt ?? a.startedAt),
+        )[0];
+      return completed ? synthesizeResult(completed) : null;
+    },
 
-  resumeSession(sessionId: string): AssessmentSession {
-    const session = mutateSession(sessionId, (s) => {
-      if (s.status === "completed" || s.status === "expired") fail(409, "session_not_active");
-      s.status = "in_progress";
-    });
-    return toClientSession(session, currentQuestionFor(session));
-  },
+    /** Test seam: clears this engine's persisted sessions. */
+    __reset(): void {
+      store.clear();
+    },
+  };
+}
 
-  completeSession(sessionId: string): AssessmentSession {
-    const session = mutateSession(sessionId, (s) => {
-      if (s.status !== "in_progress" && s.status !== "paused") fail(409, "session_not_active");
-      s.status = "completed";
-      s.completedAt = new Date().toISOString();
-    });
-    return toClientSession(session, null);
-  },
-
-  getResults(sessionId: string): AssessmentResult {
-    const sessions = loadSessions();
-    const session = sessions.find((s) => s.id === sessionId);
-    if (!session) fail(404, "session_not_found");
-    expireIfNeeded(session);
-    if (session.status !== "completed") fail(409, "assessment_not_completed");
-    return synthesizeResult(session);
-  },
-
-  /**
-   * Most recent completed assessment result, or null. Consumed by the
-   * STEP 5 goal engine so diagnosis context is resolved server-side —
-   * the client never has to carry it between features.
-   */
-  getLatestCompletedResult(): AssessmentResult | null {
-    const sessions = loadSessions();
-    const completed = sessions
-      .filter((s) => s.status === "completed")
-      .sort((a, b) => (b.completedAt ?? b.startedAt).localeCompare(a.completedAt ?? a.startedAt))[0];
-    if (!completed) return null;
-    return synthesizeResult(completed);
-  },
-
-  /** Test helper: clears persisted mock state between tests. */
-  __reset(): void {
-    memoryStore = [];
-    try {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // Ignore unavailable storage in non-browser contexts.
-    }
-  },
-};
+export type AssessmentEngine = ReturnType<typeof createAssessmentEngine>;
