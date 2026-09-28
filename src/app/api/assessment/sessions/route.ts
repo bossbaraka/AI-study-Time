@@ -4,7 +4,7 @@ import { AuthGatewayError } from "@/lib/server/auth/gateway";
 import { checkRate } from "@/lib/server/auth/rate-limit";
 import { invalidRequestResponse, withStudent } from "@/lib/server/auth/request";
 import { createSessionSchema } from "@/schemas/assessment-api";
-import { mockAssessmentEngine } from "@/services/engines";
+import { mockAssessmentEngine } from "@/services/engines.server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

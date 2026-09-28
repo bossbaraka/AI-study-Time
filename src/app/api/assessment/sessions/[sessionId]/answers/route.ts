@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { mockAssessmentEngine } from "@/services/engines";
+import { mockAssessmentEngine } from "@/services/engines.server";
 import { invalidRequestResponse, withStudent } from "@/lib/server/auth/request";
 import { submitAnswerSchema } from "@/schemas/assessment-api";
 

@@ -18,7 +18,10 @@ const { sessions, cookieJar } = vi.hoisted(() => ({
   cookieJar: { token: undefined as string | undefined },
 }));
 
-vi.mock("@/lib/server/db", () => ({ prisma: {} }));
+// `@/lib/server/db` is deliberately NOT mocked any more. These routes now
+// run on PostgreSQL, so stubbing the client with an empty object — which was
+// correct while the engine was in-memory — would make every model delegate
+// undefined. Auth is still mocked below; that is what this suite is about.
 
 vi.mock("@/lib/server/auth/gateway", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/server/auth/gateway")>();
@@ -100,7 +103,10 @@ import { POST as pauseSession } from "@/app/api/assessment/sessions/[sessionId]/
 import { GET as getResults } from "@/app/api/assessment/sessions/[sessionId]/results/route";
 import { GET as getLatestResult } from "@/app/api/assessment/results/latest/route";
 import { __clearRateBuckets } from "@/lib/server/auth/rate-limit";
-import { mockAssessmentEngine } from "@/services/engines";
+import { errorResponse } from "@/lib/server/auth/request";
+import { PersistenceConflictError } from "@/services/ports/stores";
+import { mockAssessmentEngine } from "@/services/engines.server";
+import { prisma } from "@/lib/server/db";
 import type { AssessmentSession, SubmitAnswerPayload } from "@/types/assessment";
 
 const TOKEN_A = "token_student_a";
@@ -163,6 +169,22 @@ beforeEach(async () => {
   cookieJar.token = undefined;
   __clearRateBuckets();
   await mockAssessmentEngine.__reset();
+  // The routes now run on PostgreSQL, so the owners have to exist: every
+  // learning row carries a foreign key to `User`.
+  for (const id of [STUDENT_A, STUDENT_B, "guardian_01"]) {
+    await prisma.user.upsert({
+      where: { id },
+      create: {
+        id,
+        email: `${id}@routes.test`,
+        passwordHash: "x",
+        name: id,
+        role: id === "guardian_01" ? "guardian" : "student",
+        status: "active",
+      },
+      update: {},
+    });
+  }
 });
 
 describe("POST /api/assessment/sessions — authentication and ownership", () => {
@@ -389,5 +411,76 @@ describe("server-authoritative grading over HTTP (§43.5)", () => {
       params(created.id),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+/**
+ * §20 — the answer-key boundary, proven across the whole HTTP path.
+ *
+ * The route test above shows the wire never carries the key. This pairs that
+ * with the database: the SAME session's stored row does hold it, in a column
+ * no serializer reads. The boundary is therefore a property of the schema,
+ * not of someone remembering to strip a field before responding.
+ */
+describe("answer key boundary, HTTP ↔ database (§20)", () => {
+  it("serves the question but keeps the key server-side", async () => {
+    signInAs(TOKEN_A);
+    // A profile makes the generator run, so the session carries its OWN bank
+    // rather than falling back to the static in-code one. That is the case
+    // where a per-session answer key exists to be persisted — and to leak.
+    const res = await call(
+      createSession,
+      json({ profile: { targetSubject: "Cell biology", age: 16, stage: "high_school" } }),
+    );
+    expect(res.status).toBe(201);
+    // Read the wire once: a Response body cannot be consumed twice.
+    const served = await res.text();
+    const created = JSON.parse(served) as AssessmentSession;
+
+    // The public payload is usable: the student can read and answer it.
+    expect(served).toContain("prompt");
+    expect(served).not.toContain("correctOptionId");
+    expect(served).not.toContain("minMatches");
+    expect(served).not.toContain("scoring");
+
+    // ...and the key really is persisted, just out of reach.
+    const rows = await prisma.assessmentQuestion.findMany({
+      where: { sessionId: created.id },
+    });
+    expect(rows.length).toBeGreaterThan(0);
+    const storedKeys = rows.map((r) => JSON.stringify(r.scoring)).join("");
+    expect(storedKeys).toContain("kind");
+    const storedPublic = rows.map((r) => JSON.stringify(r.question)).join("");
+    expect(storedPublic).not.toContain("correctOptionId");
+  });
+});
+
+/**
+ * §28 — the HTTP boundary distinguishes a rejected write from an outage, and
+ * from a bug. None of the three may surface as a bare 500, and none may carry
+ * a driver message.
+ */
+describe("error mapping at the HTTP boundary (§28)", () => {
+  it("maps a constraint conflict to 409, not 500", async () => {
+    const res = await errorResponse(new PersistenceConflictError("duplicate_key"));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ code: "conflict" });
+  });
+
+  it("maps an unreachable database to 503 so the client knows to retry", async () => {
+    const unreachable = Object.assign(new Error("Can't reach database server"), {
+      code: "P1001",
+    });
+    const res = await errorResponse(unreachable);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ code: "service_unavailable" });
+  });
+
+  it("never forwards a driver message on an unexpected failure", async () => {
+    const res = await errorResponse(new Error("SELECT * FROM \"Goal\" WHERE secret = $1"));
+    expect(res.status).toBe(500);
+    const payload = JSON.stringify(await res.json());
+    expect(payload).toEqual(JSON.stringify({ code: "unknown" }));
+    expect(payload).not.toContain("SELECT");
   });
 });

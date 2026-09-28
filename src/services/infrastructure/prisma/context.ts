@@ -57,6 +57,31 @@ export function isForeignKeyViolation(error: unknown): boolean {
   return codeOf(error) === "P2003";
 }
 
+/**
+ * Is this a failure to TALK to the database, rather than a refusal by it?
+ *
+ * The distinction decides the HTTP answer: a constraint violation is the
+ * caller's conflict (409), while an unreachable database is our outage
+ * (503). Conflating them tells a client to retry something that will never
+ * succeed, or to give up on something that would work in a second.
+ */
+export function isDatabaseUnavailable(error: unknown): boolean {
+  const code = codeOf(error);
+  // P1001 cannot reach the database · P1002 connection timeout ·
+  // P1008 operations timed out · P1017 server closed the connection.
+  return code === "P1001" || code === "P1002" || code === "P1008" || code === "P1017";
+}
+
+/** A short, loggable label. Never a message, never a query, never a secret. */
+export function dbErrorCategory(error: unknown): string {
+  if (isDatabaseUnavailable(error)) return "db_unavailable";
+  if (isUniqueViolation(error)) return "constraint_duplicate";
+  if (isForeignKeyViolation(error)) return "constraint_reference";
+  if (isMissingRow(error)) return "not_found";
+  if (error instanceof PersistenceConflictError) return `conflict_${error.reason}`;
+  return "internal";
+}
+
 function codeOf(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const code = (error as { code?: unknown }).code;

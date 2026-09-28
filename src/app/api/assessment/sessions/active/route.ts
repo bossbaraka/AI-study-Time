@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { mockAssessmentEngine } from "@/services/engines";
+import { mockAssessmentEngine } from "@/services/engines.server";
 import { withStudent } from "@/lib/server/auth/request";
 
 export const runtime = "nodejs";

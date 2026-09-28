@@ -28,6 +28,11 @@
 /prisma/data/*.db
 /prisma/data/*.db-journal
 
+# Local development PostgreSQL data directory (created by
+# scripts/local-postgres.mjs). It is a live cluster, never source: it holds
+# rows, WAL segments and the server's own key material.
+/.pgdata/
+
 # Debug logs
 npm-debug.log*
 yarn-debug.log*
