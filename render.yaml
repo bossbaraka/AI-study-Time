@@ -1,9 +1,9 @@
-﻿services:
+services:
   - type: web
     name: mureeh-study-assistant
     runtime: node
     plan: free
-    buildCommand: npm install && npx prisma migrate deploy && npm run build
+    buildCommand: npm install --include=dev && npx prisma migrate deploy && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     autoDeploy: true
