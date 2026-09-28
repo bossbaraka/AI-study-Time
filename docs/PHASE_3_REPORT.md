@@ -19,9 +19,9 @@ Phase 3 auth now has real invitation-bound email verification: accounts remain u
 Two findings prevent a PASS claim:
 
 1. **The module-testing feature is still not server-authoritative.** The browser computes correctness and the feature has no persisted domain/API. This P0 remains deferred pending approved per-question rubrics for AI grading.
-2. **Several Phase 4/5 product services have no domain API yet.** Their mock transport fails explicitly with `501 feature_deferred` outside Vitest unless `NEXT_PUBLIC_DEMO_DATA=true` in a non-production runtime. The production demo flag is ignored, so missing persistence cannot look like real student data. Vercel preview deployment also currently fails; its protected build logs could not be inspected without the project integration.
+2. **Several Phase 4/5 product services have no domain API yet.** Their mock transport fails explicitly with `501 feature_deferred` outside Vitest unless `NEXT_PUBLIC_DEMO_DATA=true` in a non-production runtime. The production demo flag is ignored, so missing persistence cannot look like real student data. The latest Vercel preview is pending; the prior failed deployment's protected logs could not be inspected, and restored project access is not yet confirmed.
 
-**Final status: `PHASE 3 — PARTIAL`.** Goal/Roadmap/Execution and auth token-verification paths are implemented and verified. Deferred learning features and the inaccessible external deployment failure are disclosed rather than hidden.
+**Final status: `PHASE 3 — PARTIAL`.** Goal/Roadmap/Execution and auth token-verification paths are implemented and verified. Deferred learning features and the pending Vercel preview status are disclosed rather than hidden.
 
 ## 2. Endpoint Inventory
 
@@ -184,7 +184,7 @@ Phase 3 adds one additive PostgreSQL migration for one-use email verification to
 | PostgreSQL migrations | Three additive migrations / 16 tables; Phase 3 adds hashed email-verification tokens and SMTP delivery state, with no destructive changes | VERIFIED against local PostgreSQL |
 | `npx next build` with local PostgreSQL and `NEXT_FONT_GOOGLE_MOCKED_RESPONSES` fixture | succeeds; 43 API paths emitted | VERIFIED via Next's official font-mock hook; live Google Fonts remains blocked |
 | Build against live `fonts.googleapis.com` from this sandbox | network egress unavailable | BLOCKED |
-| Vercel preview for PR #1 | deployment status `failure`; protected logs require Vercel project authorization | BLOCKED pending Vercel reconnect/log inspection |
+| Vercel preview for commit `9a691ef` | status `pending`; previous failed deployment's protected logs were inaccessible | BLOCKED pending deployment result and confirmation of project access |
 
 The test groups sum exactly: `91 HTTP + 31 repository contract/reality + 21 auth gateway-domain + 427 other unit/component = 570`. The route suites use real PostgreSQL; only session resolution is faked in protected-route suites. Auth routes and the gateway suite exercise registration → verification → login over actual HTTP handlers. SMTP transport tests stub only the external mail transport; token storage, rate limits, and auth persistence remain real. No `.skip()`, `.only()`, expected failure, or disabled assertion was introduced.
 
