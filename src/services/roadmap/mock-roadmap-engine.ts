@@ -572,13 +572,17 @@ export function createRoadmapEngine(deps: RoadmapEngineDeps) {
     // never mutated in place (§20). Versions increase monotonically per
     // student: 1 + the highest version ever generated.
     let version = 1;
+    // Collected rather than written here: the supersede and the insert have
+    // to commit together, so neither happens until the new plan is built and
+    // has passed validation.
+    const superseded: Roadmap[] = [];
     for (const entry of owned) {
       version = Math.max(version, entry.version + 1);
       if (["draft", "active", "paused"].includes(entry.status)) {
         assertTransition(entry.status, "revised");
         entry.status = "revised";
         entry.updatedAt = nowIso();
-        await store.upsert(entry);
+        superseded.push(entry);
       }
     }
 
@@ -632,7 +636,13 @@ export function createRoadmapEngine(deps: RoadmapEngineDeps) {
     const first = roadmap.milestones[0];
     if (first) first.status = "in_progress";
 
-    await store.upsert(roadmap);
+    // One transaction (§13). Written separately, a failure between the two
+    // would leave the student with either two live plans or none at all —
+    // and `getActiveRoadmap` picks "newest live", so both are visible bugs.
+    await store.transaction(async () => {
+      for (const entry of superseded) await store.upsert(entry);
+      await store.upsert(roadmap);
+    });
     return { roadmap: cloneRoadmap(roadmap), created: true };
   },
 

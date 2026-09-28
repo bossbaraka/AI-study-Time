@@ -30,6 +30,24 @@ import type { LearningUnitExecution } from "@/types/execution";
 import type { LearningGoal } from "@/types/goal";
 import type { Roadmap } from "@/types/roadmap";
 
+/**
+ * A write the domain considered valid but the database refused (§28).
+ *
+ * This exists so no caller ever has to recognise a database error. A unique
+ * constraint firing means a concurrent writer won the race for an idempotency
+ * key — the honest answer is "conflict, retry", not a silent success and not
+ * a stack trace carrying a constraint name into an HTTP response.
+ */
+export class PersistenceConflictError extends Error {
+  constructor(
+    readonly reason: "duplicate_key" | "invalid_reference" | "not_found",
+    message?: string,
+  ) {
+    super(message ?? reason);
+    this.name = "PersistenceConflictError";
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Assessment                                                          */
 /* ------------------------------------------------------------------ */
@@ -90,10 +108,28 @@ export interface AssessmentSessionStore {
 /* Goal                                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Runs `work` so that every write it makes is committed together or not at
+ * all.
+ *
+ * Only the two stores that own a multi-aggregate write expose this: revising
+ * a goal marks the old one `revised` AND inserts its successor, and
+ * regenerating a roadmap supersedes the previous plan AND inserts the new
+ * one. Both are two aggregates that must agree, so both need a transaction.
+ * Every other store writes exactly one row per call and does not get one —
+ * a transaction that guards a single write is theatre, not safety.
+ *
+ * The in-memory and localStorage adapters run `work` directly: they have no
+ * partial write to protect.
+ */
+export type TransactionRunner = <T>(work: () => Promise<T>) => Promise<T>;
+
 export interface GoalStore {
   listByStudent(studentId: string): Promise<LearningGoal[]>;
   findById(id: string): Promise<LearningGoal | undefined>;
   upsert(goal: LearningGoal): Promise<void>;
+  /** Atomic multi-write. See `TransactionRunner`. */
+  transaction: TransactionRunner;
   /** Test seam. Prisma implements this as `deleteMany()`. */
   clear(): Promise<void>;
 }
@@ -106,6 +142,8 @@ export interface RoadmapStore {
   listByStudent(studentId: string): Promise<Roadmap[]>;
   findById(id: string): Promise<Roadmap | undefined>;
   upsert(roadmap: Roadmap): Promise<void>;
+  /** Atomic multi-write: supersede + insert. See `TransactionRunner`. */
+  transaction: TransactionRunner;
   /** Test seam. Prisma implements this as `deleteMany()`. */
   clear(): Promise<void>;
 }

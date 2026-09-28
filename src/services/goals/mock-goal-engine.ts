@@ -626,8 +626,14 @@ export function createGoalEngine(deps: GoalEngineDeps) {
     assertTransition(revision.status, postValidationStatus(validation));
     revision.status = postValidationStatus(validation);
 
-    await store.upsert(goal);
-    await store.upsert(revision);
+    // Two aggregates that must agree: a goal marked `revised` with no
+    // successor would leave the student with no editable goal at all. Either
+    // both land or neither does (§13). The in-memory adapter runs this
+    // straight through; PostgreSQL commits it as one transaction.
+    await store.transaction(async () => {
+      await store.upsert(goal);
+      await store.upsert(revision);
+    });
     return { goal: cloneGoal(revision), validation };
   },
 

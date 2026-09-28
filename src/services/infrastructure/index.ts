@@ -71,6 +71,9 @@ export function createStores(kind: StoreBackend): DomainStores {
       listByStudent: async (studentId) => goals.list().filter((goal) => goal.studentId === studentId),
       findById: async (id) => goals.findById(id),
       upsert: async (goal) => goals.upsert(goal),
+      // In-memory writes cannot be observed half-done, so the transaction
+      // is a passthrough — the contract is honoured, not faked.
+      transaction: (work) => work(),
       clear: async () => goals.clear(),
     },
     roadmaps: {
@@ -78,6 +81,7 @@ export function createStores(kind: StoreBackend): DomainStores {
         roadmaps.list().filter((roadmap) => roadmap.studentId === studentId),
       findById: async (id) => roadmaps.findById(id),
       upsert: async (roadmap) => roadmaps.upsert(roadmap),
+      transaction: (work) => work(),
       clear: async () => roadmaps.clear(),
     },
     executions: {
