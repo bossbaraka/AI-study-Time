@@ -82,8 +82,8 @@ A non-owner with no active roadmap receives the existing non-leaking `unit_unava
 | `GET /api/auth/session` | cookie optional | none | auth gateway → Prisma/PostgreSQL | current session state or unauthenticated; gateway tests | REAL |
 | `POST /api/auth/forgot-password` | public | forgot schema | auth gateway → reset token/outbox/audit in PostgreSQL | enumeration-resistant response; email delivery remains outbox/provider dependent; gateway tests | REAL |
 | `POST /api/auth/reset-password` | public | reset schema | auth gateway → transaction: user update, token used, sessions revoked | token error codes preserved; gateway tests | REAL |
-| `POST /api/auth/verify-email` | public | **body currently not validated** | static route response; gateway is invitation-preverified and has no token verification operation | always returns `already-verified`; no mutation | PARTIAL |
-| `POST /api/auth/resend-verification` | public | **body currently not validated** | static route response; gateway has no delivery operation | always returns `sent`; no mutation | PARTIAL |
+| `POST /api/auth/verify-email` | public | `{token}` required, trimmed, 1–512 chars (`verifyEmailSchema`) | static route response; gateway is invitation-preverified and has no token verification operation | always returns `already-verified`; no mutation | PARTIAL |
+| `POST /api/auth/resend-verification` | public | email validated with `forgotPasswordSchema` | static route response; gateway has no delivery operation | always returns `sent`; no mutation | PARTIAL |
 
 The two partial auth routes are not called REAL merely because the gateway pre-verifies invitation users. Their static responses do not verify a token or enqueue a message. Implementing actual email verification/delivery needs a defined product/provider contract (Phase 5/6); no behavior was invented here.
 
