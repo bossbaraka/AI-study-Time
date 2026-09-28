@@ -1,12 +1,14 @@
 /**
- * Mock Execution Engine (Phase 7) — runtime state over the Stage 6 plan.
+ * Execution Engine (Phase 7) — runtime state over the Stage 6 plan.
  *
- * Isolated from React and independently testable, exactly like the auth,
- * assessment, goal and roadmap engines. A future real backend replaces
- * this module behind the identical `execution.service.ts` contract.
+ * Isolated from React, storage and transport, and independently testable.
+ * Execution records go through the injected `ExecutionStore` port and the
+ * active roadmap through the `RoadmapLookup` port, so this module imports
+ * no other engine. A future real backend swaps the adapters only, behind
+ * the identical `execution.service.ts` contract.
  *
  * Ownership & trust (§6/§18): the student is always the session student;
- * the roadmap is always resolved through `mockRoadmapEngine` (Stage 6
+ * the roadmap is always resolved through the `RoadmapLookup` port (Stage 6
  * ownership discipline) — client input carries a unitId only, and an
  * unknown unit is indistinguishable from a foreign one (404, no leaks).
  *
@@ -35,7 +37,8 @@ import {
   InvalidExecutionTransitionError,
 } from "@/services/execution/execution-state-machine";
 import { developmentEvaluator } from "@/services/execution/development-evaluator";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import type { RoadmapLookup } from "@/services/ports/lookups";
+import type { ExecutionStore } from "@/services/ports/stores";
 import type {
   EvidenceInput,
   LearningUnitExecution,
@@ -43,36 +46,6 @@ import type {
   UnitLearningContext,
 } from "@/types/execution";
 import type { Roadmap } from "@/types/roadmap";
-
-const STORAGE_KEY = "mureeh.mock.executions.v1";
-
-/* ------------------------------------------------------------------ */
-/* Persistence (mirrors the roadmap-engine mock pattern)               */
-/* ------------------------------------------------------------------ */
-
-let memoryStore: LearningUnitExecution[] = [];
-
-function loadExecutions(): LearningUnitExecution[] {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return memoryStore;
-    const parsed = JSON.parse(raw) as LearningUnitExecution[];
-    if (!Array.isArray(parsed)) return memoryStore;
-    memoryStore = parsed;
-    return memoryStore;
-  } catch {
-    return memoryStore;
-  }
-}
-
-function saveExecutions(executions: LearningUnitExecution[]): void {
-  memoryStore = executions;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(executions));
-  } catch {
-    // Storage unavailable: memory-only is acceptable for the mock phase.
-  }
-}
 
 function cloneExecution(execution: LearningUnitExecution): LearningUnitExecution {
   return JSON.parse(JSON.stringify(execution)) as LearningUnitExecution;
@@ -94,20 +67,6 @@ function newExecutionId(): string {
 /* Resolution helpers (session student → roadmap → unit)               */
 /* ------------------------------------------------------------------ */
 
-function activeRoadmapFor(studentId: string): Roadmap {
-  const roadmap = mockRoadmapEngine.getActiveRoadmap(studentId);
-  if (!roadmap) throw new LearningUnitUnavailableError("no_active_roadmap");
-  return roadmap;
-}
-
-function executableRoadmapFor(studentId: string): Roadmap {
-  const roadmap = activeRoadmapFor(studentId);
-  if (roadmap.status !== "active") {
-    throw new LearningUnitUnavailableError("roadmap_not_executable");
-  }
-  return roadmap;
-}
-
 function resolveUnit(roadmap: Roadmap, learningUnitId: string): OrderedUnit {
   for (const entry of orderedUnits(roadmap)) {
     if (entry.unit.id === learningUnitId) return entry;
@@ -116,30 +75,50 @@ function resolveUnit(roadmap: Roadmap, learningUnitId: string): OrderedUnit {
   throw new ExecutionNotFoundError();
 }
 
-function executionsForRoadmap(roadmapId: string): LearningUnitExecution[] {
-  return loadExecutions().filter((execution) => execution.roadmapId === roadmapId);
+export interface ExecutionEngineDeps {
+  executions: ExecutionStore;
+  /** Read side of the roadmap domain — breaks the engine→engine import. */
+  roadmaps: RoadmapLookup;
 }
 
-function findExecution(
-  executions: readonly LearningUnitExecution[],
-  learningUnitId: string,
-): LearningUnitExecution | undefined {
-  return executions.find((execution) => execution.learningUnitId === learningUnitId);
-}
+export function createExecutionEngine(deps: ExecutionEngineDeps) {
+  const store = deps.executions;
+  const roadmaps = deps.roadmaps;
 
-/* ------------------------------------------------------------------ */
-/* Engine                                                              */
-/* ------------------------------------------------------------------ */
+  async function activeRoadmapFor(studentId: string): Promise<Roadmap> {
+    const roadmap = await roadmaps.getActiveRoadmap(studentId);
+    if (!roadmap) throw new LearningUnitUnavailableError("no_active_roadmap");
+    return roadmap;
+  }
 
-export const mockExecutionEngine = {
+  async function executableRoadmapFor(studentId: string): Promise<Roadmap> {
+    const roadmap = await activeRoadmapFor(studentId);
+    if (roadmap.status !== "active") {
+      throw new LearningUnitUnavailableError("roadmap_not_executable");
+    }
+    return roadmap;
+  }
+
+  function executionsForRoadmap(roadmapId: string): Promise<LearningUnitExecution[]> {
+    return store.listByRoadmap(roadmapId);
+  }
+
+  function findExecution(
+    executions: readonly LearningUnitExecution[],
+    learningUnitId: string,
+  ): LearningUnitExecution | undefined {
+    return executions.find((execution) => execution.learningUnitId === learningUnitId);
+  }
+
+  return {
   /**
    * Runtime view over the student's active roadmap — null when there is
    * no roadmap at all (the UI then belongs on /roadmap or /goals).
    */
-  getExecutionView(studentId: string): RoadmapExecutionView | null {
-    const roadmap = mockRoadmapEngine.getActiveRoadmap(studentId);
+  async getExecutionView(studentId: string): Promise<RoadmapExecutionView | null> {
+    const roadmap = await roadmaps.getActiveRoadmap(studentId);
     if (!roadmap) return null;
-    const executions = executionsForRoadmap(roadmap.id);
+    const executions = await executionsForRoadmap(roadmap.id);
     const current = selectCurrentUnit(roadmap, executions);
     return {
       roadmapId: roadmap.id,
@@ -151,10 +130,13 @@ export const mockExecutionEngine = {
   },
 
   /** Full learn-screen context for one unit, resolved server-side. */
-  getUnitContext(learningUnitId: string, studentId: string): UnitLearningContext {
-    const roadmap = activeRoadmapFor(studentId);
+  async getUnitContext(
+    learningUnitId: string,
+    studentId: string,
+  ): Promise<UnitLearningContext> {
+    const roadmap = await activeRoadmapFor(studentId);
     const { milestone, unit } = resolveUnit(roadmap, learningUnitId);
-    const executions = executionsForRoadmap(roadmap.id);
+    const executions = await executionsForRoadmap(roadmap.id);
     const execution = findExecution(executions, learningUnitId) ?? null;
     const states = deriveUnitStates(roadmap, executions);
     const next = nextUnitAfter(roadmap, executions, learningUnitId);
@@ -176,10 +158,13 @@ export const mockExecutionEngine = {
   },
 
   /** The raw execution record for a unit (null when never started). */
-  getExecutionState(learningUnitId: string, studentId: string): LearningUnitExecution | null {
-    const roadmap = activeRoadmapFor(studentId);
+  async getExecutionState(
+    learningUnitId: string,
+    studentId: string,
+  ): Promise<LearningUnitExecution | null> {
+    const roadmap = await activeRoadmapFor(studentId);
     resolveUnit(roadmap, learningUnitId);
-    const execution = findExecution(executionsForRoadmap(roadmap.id), learningUnitId);
+    const execution = findExecution(await executionsForRoadmap(roadmap.id), learningUnitId);
     return execution ? cloneExecution(execution) : null;
   },
 
@@ -189,14 +174,13 @@ export const mockExecutionEngine = {
    * retry edge after needs_review / failed (state machine guards it;
    * passed executions can never reopen).
    */
-  startLearningUnit(learningUnitId: string, studentId: string): LearningUnitExecution {
-    const roadmap = executableRoadmapFor(studentId);
+  async startLearningUnit(
+    learningUnitId: string,
+    studentId: string,
+  ): Promise<LearningUnitExecution> {
+    const roadmap = await executableRoadmapFor(studentId);
     const { milestone, unit } = resolveUnit(roadmap, learningUnitId);
-    const executions = loadExecutions();
-    const existing = executions.find(
-      (execution) =>
-        execution.roadmapId === roadmap.id && execution.learningUnitId === unit.id,
-    );
+    const existing = findExecution(await executionsForRoadmap(roadmap.id), unit.id);
 
     if (existing) {
       if (existing.status === "in_progress") {
@@ -207,15 +191,12 @@ export const mockExecutionEngine = {
       // submitted or evaluated+passed → InvalidExecutionTransitionError.
       assertTransition(existing, "in_progress");
       existing.status = "in_progress";
-      saveExecutions(executions);
+      await store.upsert(existing);
       return cloneExecution(existing);
     }
 
     // Dependency gate (§6.5): blocked units cannot start.
-    const roadmapExecutions = executions.filter(
-      (execution) => execution.roadmapId === roadmap.id,
-    );
-    if (!isUnitStartable(roadmap, roadmapExecutions, unit.id)) {
+    if (!isUnitStartable(roadmap, await executionsForRoadmap(roadmap.id), unit.id)) {
       throw new LearningUnitUnavailableError("dependencies_unsatisfied");
     }
 
@@ -228,8 +209,7 @@ export const mockExecutionEngine = {
       status: "in_progress",
       startedAt: nowIso(),
     };
-    executions.push(execution);
-    saveExecutions(executions);
+    await store.upsert(execution);
     return cloneExecution(execution);
   },
 
@@ -239,18 +219,14 @@ export const mockExecutionEngine = {
    * submitting different evidence over a submitted/evaluated record is a
    * conflict — the honest path is retry-then-resubmit (§16).
    */
-  submitEvidence(
+  async submitEvidence(
     learningUnitId: string,
     input: EvidenceInput,
     studentId: string,
-  ): LearningUnitExecution {
-    const roadmap = executableRoadmapFor(studentId);
+  ): Promise<LearningUnitExecution> {
+    const roadmap = await executableRoadmapFor(studentId);
     resolveUnit(roadmap, learningUnitId);
-    const executions = loadExecutions();
-    const existing = executions.find(
-      (execution) =>
-        execution.roadmapId === roadmap.id && execution.learningUnitId === learningUnitId,
-    );
+    const existing = findExecution(await executionsForRoadmap(roadmap.id), learningUnitId);
     if (!existing) {
       // Never started: available → submitted is not a legal transition.
       throw new InvalidExecutionTransitionError("available", "submitted");
@@ -276,7 +252,7 @@ export const mockExecutionEngine = {
     execution.evidence = { kind: "text", solution, reasoning, submittedAt };
     execution.submittedAt = submittedAt;
     execution.status = "submitted";
-    saveExecutions(executions);
+    await store.upsert(execution);
     return cloneExecution(execution);
   },
 
@@ -285,14 +261,13 @@ export const mockExecutionEngine = {
    * Deterministic: replaying evaluation of the same evidence returns the
    * same result without corrupting state (§16).
    */
-  evaluateExecution(learningUnitId: string, studentId: string): LearningUnitExecution {
-    const roadmap = executableRoadmapFor(studentId);
+  async evaluateExecution(
+    learningUnitId: string,
+    studentId: string,
+  ): Promise<LearningUnitExecution> {
+    const roadmap = await executableRoadmapFor(studentId);
     resolveUnit(roadmap, learningUnitId);
-    const executions = loadExecutions();
-    const existing = executions.find(
-      (execution) =>
-        execution.roadmapId === roadmap.id && execution.learningUnitId === learningUnitId,
-    );
+    const existing = findExecution(await executionsForRoadmap(roadmap.id), learningUnitId);
     if (!existing) {
       // Nothing submitted: available → evaluated is not a legal transition.
       throw new InvalidExecutionTransitionError("available", "evaluated");
@@ -312,17 +287,15 @@ export const mockExecutionEngine = {
     execution.result = developmentEvaluator.evaluate(execution.evidence);
     execution.evaluatedAt = nowIso();
     execution.status = "evaluated";
-    saveExecutions(executions);
+    await store.upsert(execution);
     return cloneExecution(execution);
   },
 
-  /** Test helper: clears persisted mock state. */
-  __reset(): void {
-    memoryStore = [];
-    try {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // Ignore unavailable storage in non-browser contexts.
-    }
+  /** Test seam: clears this engine's persisted executions. */
+  async __reset(): Promise<void> {
+    await store.clear();
   },
-};
+  };
+}
+
+export type ExecutionEngine = ReturnType<typeof createExecutionEngine>;

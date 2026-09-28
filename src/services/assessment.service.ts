@@ -1,15 +1,25 @@
 /**
  * Assessment service — the single entry point for all assessment operations.
  *
- * UI → hooks → THIS service → API client (mock ⇄ http).
- * Components never call fetch, never see the mock engine, never contain
- * adaptive/diagnostic logic. When the real AI assessment backend lands,
- * only the `USE_MOCK` branch is removed — the contract is identical.
+ * UI → hooks → THIS service → transport.
+ * Components never call fetch, never see the engine, never contain
+ * adaptive/diagnostic logic.
+ *
+ * Transport resolution (see `ASSESSMENT_USE_API`):
+ * - Application runtime → the REAL server-side assessment API. Evaluation
+ *   is server-authoritative: the client submits a response, the server
+ *   holds the answer key and decides the score. No scoring data ever
+ *   reaches the browser.
+ * - Unit tests → the in-process engine, keeping component tests hermetic.
+ *
+ * Ownership: `studentId` is resolved from the authenticated session by
+ * `requireStudentId` on the mock path, and from the session cookie by the
+ * route handlers on the real path. It is never accepted from client input.
  */
 
-import { ApiError, USE_MOCK, httpRequest, mockRequest } from "@/lib/api/client";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
-import type { BankItem } from "@/services/assessment/question-bank";
+import { ApiError, httpRequest, mockRequest } from "@/lib/api/client";
+import { mockAssessmentEngine } from "@/services/engines";
+import { requireStudentId } from "@/services/session-guard";
 import { isAssessmentErrorCode } from "@/types/assessment";
 import type {
   AssessmentResult,
@@ -17,6 +27,13 @@ import type {
   StudentAssessmentProfile,
   SubmitAnswerPayload,
 } from "@/types/assessment";
+
+/**
+ * Assessment runs against the real server-side API in the application and
+ * against the in-process engine under Vitest. One switch, nothing else
+ * changes — mirrors `AUTH_USE_GATEWAY` in `lib/api/client.ts`.
+ */
+export const ASSESSMENT_USE_API = !process.env.VITEST;
 
 /** Assessment-specific error carrying a stable, non-sensitive domain code. */
 export class AssessmentApiError extends ApiError {
@@ -39,6 +56,8 @@ function toAssessmentError(error: unknown): AssessmentApiError {
     if (error.code === "network" || error.status === 0) {
       return new AssessmentApiError("network", error.status);
     }
+    if (error.status === 401) return new AssessmentApiError("unauthenticated", 401);
+    if (error.status === 403) return new AssessmentApiError("forbidden", 403);
     return new AssessmentApiError("unknown", error.status);
   }
   if (error instanceof TypeError) {
@@ -54,117 +73,143 @@ function viaHttp<T>(run: () => Promise<T>): Promise<T> {
   });
 }
 
+/** Same funnel for the in-process branch: callers always see AssessmentApiError. */
+function viaEngine<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return mockRequest(run, signal).catch((error: unknown) => {
+    throw toAssessmentError(error);
+  });
+}
+
 export const assessmentService = {
-  async createSession(
+  /**
+   * Creates a session. On the real path the server generates (or selects)
+   * the questions AND keeps the answer key — the browser receives the
+   * public question only.
+   */
+  createSession(
     profile?: StudentAssessmentProfile,
     signal?: AbortSignal,
   ): Promise<AssessmentSession> {
-    let customData: { bank: BankItem[]; topics: string[] } | undefined;
-    if (profile) {
-      try {
-        const res = await fetch("/api/assessment/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(profile),
-          signal,
-        });
-        if (res.ok) {
-          customData = (await res.json()) as { bank: BankItem[]; topics: string[] };
-        }
-      } catch (err) {
-        console.warn("[assessmentService] AI generation fetch failed, falling back:", err);
-      }
-    }
-
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.createSession(profile, customData), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentSession>("/api/assessment/sessions", {
             method: "POST",
-            body: { profile, customData },
+            body: { profile },
             signal,
           }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.createSession(studentId, profile);
+        }, signal);
   },
 
   /** Most recent unfinished session for the signed-in student, if any. */
   getActiveSession(signal?: AbortSignal): Promise<AssessmentSession | null> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.getActiveSession(), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentSession | null>("/api/assessment/sessions/active", { signal }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.getActiveSession(studentId);
+        }, signal);
   },
 
   getSession(sessionId: string, signal?: AbortSignal): Promise<AssessmentSession> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.getSession(sessionId), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentSession>(`/api/assessment/sessions/${sessionId}`, { signal }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.getSession(sessionId, studentId);
+        }, signal);
   },
 
-  /** Idempotent via `payload.submissionId` — retries never double-count. */
+  /**
+   * Idempotent via `payload.submissionId` — retries never double-count.
+   * The payload carries the student's RESPONSE only; correctness is
+   * decided by the server against its own answer key.
+   */
   submitAnswer(payload: SubmitAnswerPayload, signal?: AbortSignal): Promise<AssessmentSession> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.submitAnswer(payload), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentSession>(
             `/api/assessment/sessions/${payload.sessionId}/answers`,
             { method: "POST", body: payload, signal },
           ),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.submitAnswer(payload, studentId);
+        }, signal);
   },
 
   pauseSession(sessionId: string, signal?: AbortSignal): Promise<AssessmentSession> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.pauseSession(sessionId), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentSession>(`/api/assessment/sessions/${sessionId}/pause`, {
             method: "POST",
             signal,
           }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.pauseSession(sessionId, studentId);
+        }, signal);
   },
 
   resumeSession(sessionId: string, signal?: AbortSignal): Promise<AssessmentSession> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.resumeSession(sessionId), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentSession>(`/api/assessment/sessions/${sessionId}/resume`, {
             method: "POST",
             signal,
           }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.resumeSession(sessionId, studentId);
+        }, signal);
   },
 
   completeSession(sessionId: string, signal?: AbortSignal): Promise<AssessmentSession> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.completeSession(sessionId), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentSession>(`/api/assessment/sessions/${sessionId}/complete`, {
             method: "POST",
             signal,
           }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.completeSession(sessionId, studentId);
+        }, signal);
   },
 
   getResults(sessionId: string, signal?: AbortSignal): Promise<AssessmentResult> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.getResults(sessionId), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentResult>(`/api/assessment/sessions/${sessionId}/results`, {
             signal,
           }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.getResults(sessionId, studentId);
+        }, signal);
   },
 
   /** Most recent completed diagnosis — the STEP 5 goal-discovery input. */
   getLatestResult(signal?: AbortSignal): Promise<AssessmentResult | null> {
-    return USE_MOCK
-      ? mockRequest(() => mockAssessmentEngine.getLatestCompletedResult(), signal)
-      : viaHttp(() =>
+    return ASSESSMENT_USE_API
+      ? viaHttp(() =>
           httpRequest<AssessmentResult | null>("/api/assessment/results/latest", { signal }),
-        );
+        )
+      : viaEngine(async () => {
+          const studentId = await requireStudentId();
+          return mockAssessmentEngine.getLatestCompletedResult(studentId);
+        }, signal);
   },
 };

@@ -12,7 +12,10 @@ export async function GET(req: Request): Promise<NextResponse> {
 const create = z.object({
   email: z.string().trim().email().max(254),
   role: z.enum(["student", "guardian"]),
-  nationalId: z.string().trim().regex(/^\d{8,14}$/).optional(),
+  // The admin form submits an empty string when this optional field is blank.
+  // Accept that existing contract as well as omission; do not reject it at the
+  // transport boundary before the gateway can normalise it to null.
+  nationalId: z.string().trim().regex(/^\d{8,14}$/).or(z.literal("")).optional(),
   note: z.string().trim().max(200).optional(),
   expiresInDays: z.number().int().min(1).max(90).optional(),
 });

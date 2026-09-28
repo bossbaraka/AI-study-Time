@@ -1,14 +1,33 @@
 /**
  * API client — the single seam between the frontend and any backend.
  *
- * Today it resolves against the typed mock layer. Swapping in the real
- * REST/Supabase backend means changing `USE_MOCK` and implementing
- * `httpRequest`; no component, hook or service signature changes.
+ * Every domain that has real endpoints resolves through `httpRequest` in the
+ * running application, and through the in-process engine under Vitest so
+ * component tests stay hermetic. One switch per domain, and no component,
+ * hook or service signature changes when it flips.
  */
 
 import { appConfig } from "@/config/site";
 
-export const USE_MOCK = true;
+/**
+ * Under Vitest the browser-side services run against the in-process engines;
+ * everywhere else they call the real HTTP routes. The route handlers
+ * themselves are exercised separately, against PostgreSQL, by the API
+ * integration suites.
+ */
+const REAL_TRANSPORT = !process.env.VITEST;
+
+export const GOALS_USE_API = REAL_TRANSPORT;
+export const ROADMAPS_USE_API = REAL_TRANSPORT;
+export const EXECUTIONS_USE_API = REAL_TRANSPORT;
+
+/**
+ * Explicit developer-only demo-data opt-in for domains without real APIs yet.
+ * Ignored in production even if someone accidentally ships the variable.
+ */
+export function isDemoDataEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" && process.env.NEXT_PUBLIC_DEMO_DATA === "true";
+}
 
 /**
  * AUTH GATEWAY MODE.
@@ -55,7 +74,7 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
-/** Real HTTP transport, used once `USE_MOCK` is false. */
+/** Real HTTP transport. */
 export async function httpRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   let response: Response;
   try {
@@ -102,6 +121,13 @@ export async function mockRequest<T>(
   resolver: () => T | Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
+  // Demo rows are useful in unit tests and in an explicitly opted-in local
+  // demo. They are never a production transport, and an absent real API must
+  // not be disguised as successful fake student data (§3, §29).
+  if (!process.env.VITEST && !isDemoDataEnabled()) {
+    throw new ApiError("feature_deferred", 501, "feature_deferred");
+  }
+
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(resolve, randomLatency());
     signal?.addEventListener(

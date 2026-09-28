@@ -8,9 +8,9 @@
  * access collapses to 404 so existence is never leaked.
  */
 
-import { ApiError, USE_MOCK, httpRequest, mockRequest } from "@/lib/api/client";
+import { ApiError, ROADMAPS_USE_API, httpRequest, mockRequest } from "@/lib/api/client";
 import { DependencyCycleError } from "@/services/roadmap/graph";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockRoadmapEngine } from "@/services/engines";
 import { InvalidRoadmapTransitionError } from "@/services/roadmap/roadmap-state-machine";
 import {
   RoadmapGenerationError,
@@ -73,21 +73,21 @@ function viaMock<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 export const roadmapService = {
   /** The student's live roadmap, or null when none has been generated. */
   getActiveRoadmap(signal?: AbortSignal): Promise<Roadmap | null> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return ROADMAPS_USE_API
+      ? viaHttp(() => httpRequest<Roadmap | null>("/api/roadmaps/active", { signal }))
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockRoadmapEngine.getActiveRoadmap(studentId);
-        }, signal)
-      : viaHttp(() => httpRequest<Roadmap | null>("/api/roadmaps/active", { signal }));
+        }, signal);
   },
 
   getRoadmap(roadmapId: string, signal?: AbortSignal): Promise<Roadmap> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return ROADMAPS_USE_API
+      ? viaHttp(() => httpRequest<Roadmap>(`/api/roadmaps/${roadmapId}`, { signal }))
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockRoadmapEngine.getRoadmap(roadmapId, studentId);
-        }, signal)
-      : viaHttp(() => httpRequest<Roadmap>(`/api/roadmaps/${roadmapId}`, { signal }));
+        }, signal);
   },
 
   /**
@@ -96,39 +96,39 @@ export const roadmapService = {
    * never create duplicates (§19).
    */
   generateRoadmap(goalId: string, signal?: AbortSignal): Promise<RoadmapGenerationResult> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockRoadmapEngine.generateRoadmap(goalId, studentId);
-        }, signal)
-      : viaHttp(() =>
+    return ROADMAPS_USE_API
+      ? viaHttp(() =>
           httpRequest<RoadmapGenerationResult>("/api/roadmaps/generate", {
             method: "POST",
             body: { goalId },
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockRoadmapEngine.generateRoadmap(goalId, studentId);
+        }, signal);
   },
 
   pauseRoadmap(roadmapId: string, signal?: AbortSignal): Promise<Roadmap> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return ROADMAPS_USE_API
+      ? viaHttp(() =>
+          httpRequest<Roadmap>(`/api/roadmaps/${roadmapId}/pause`, { method: "POST", signal }),
+        )
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockRoadmapEngine.pauseRoadmap(roadmapId, studentId);
-        }, signal)
-      : viaHttp(() =>
-          httpRequest<Roadmap>(`/api/roadmaps/${roadmapId}/pause`, { method: "POST", signal }),
-        );
+        }, signal);
   },
 
   resumeRoadmap(roadmapId: string, signal?: AbortSignal): Promise<Roadmap> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return ROADMAPS_USE_API
+      ? viaHttp(() =>
+          httpRequest<Roadmap>(`/api/roadmaps/${roadmapId}/resume`, { method: "POST", signal }),
+        )
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockRoadmapEngine.resumeRoadmap(roadmapId, studentId);
-        }, signal)
-      : viaHttp(() =>
-          httpRequest<Roadmap>(`/api/roadmaps/${roadmapId}/resume`, { method: "POST", signal }),
-        );
+        }, signal);
   },
 };

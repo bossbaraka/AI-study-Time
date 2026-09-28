@@ -11,10 +11,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, type ReactNode } from "react";
 import { AssessmentRunner } from "@/features/assessment/components/assessment-runner";
 import { I18nProvider } from "@/lib/i18n/provider";
+import { authService } from "@/services/auth.service";
 import { ApiError } from "@/lib/api/client";
 import { assessmentService } from "@/services/assessment.service";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
+import { mockAssessmentEngine } from "@/services/engines";
 import type { AssessmentQuestion, AssessmentResponse, SubmitAnswerPayload } from "@/types/assessment";
+
+/**
+ * Owner for direct engine calls. Component tests must use the id the
+ * mock auth backend signs in (`usr_student_01`) so the service's
+ * session-resolved student matches the engine's stored owner.
+ */
+const STUDENT = "usr_student_01";
+const STUDENT_EMAIL = "layla.hassan@example.com";
+const PASSWORD = "securePass1";
 
 const { replaceMock, pushMock } = vi.hoisted(() => ({
   replaceMock: vi.fn(),
@@ -81,14 +91,17 @@ function firstValidResponse(question: AssessmentQuestion): AssessmentResponse {
 }
 
 describe("AssessmentRunner", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     replaceMock.mockClear();
+    // Assessment is now student-owned: the service resolves the owner
+    // from the session, so the component tests must sign one in.
+    await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
     pushMock.mockClear();
     vi.restoreAllMocks();
   });
 
   it("presents the engine's first question with honest progress", async () => {
-    const session = mockAssessmentEngine.createSession();
+    const session = await mockAssessmentEngine.createSession(STUDENT);
     renderRunner(session.id);
 
     expect(await screen.findByRole("heading", { name: session.currentQuestion!.prompt })).toBeTruthy();
@@ -99,23 +112,26 @@ describe("AssessmentRunner", () => {
 
   it("advances to the next question after a submitted answer (adaptive loop)", async () => {
     const user = userEvent.setup();
-    const session = mockAssessmentEngine.createSession();
+    const session = await mockAssessmentEngine.createSession(STUDENT);
     const firstPrompt = session.currentQuestion!.prompt;
     renderRunner(session.id);
 
     await screen.findByRole("heading", { name: firstPrompt });
     await answerCurrentQuestion(user);
 
+    // The next question and the updated progress both land on the session
+    // refetch that follows the mutation, so wait for the progress before
+    // asserting — a synchronous read here catches the mid-mutation render.
+    expect(await screen.findByText("1 questions explored")).toBeTruthy();
     await waitFor(() => {
       expect(screen.queryByRole("heading", { name: firstPrompt })).toBeNull();
     });
-    expect(screen.getByText("1 questions explored")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Submit answer" })).toBeTruthy();
   });
 
   it("never silently advances on a failed submission and retries the SAME submission (§16)", async () => {
     const user = userEvent.setup();
-    const session = mockAssessmentEngine.createSession();
+    const session = await mockAssessmentEngine.createSession(STUDENT);
     renderRunner(session.id);
     await screen.findByRole("heading", { name: session.currentQuestion!.prompt });
 
@@ -132,7 +148,7 @@ describe("AssessmentRunner", () => {
 
     // Retry: same submissionId, engine counts the answer exactly once.
     submitSpy.mockImplementation((payload: SubmitAnswerPayload) =>
-      Promise.resolve(mockAssessmentEngine.submitAnswer(payload)),
+      mockAssessmentEngine.submitAnswer(payload, STUDENT),
     );
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
@@ -143,8 +159,8 @@ describe("AssessmentRunner", () => {
   });
 
   it("redirects a completed session to its results screen", async () => {
-    const session = mockAssessmentEngine.createSession();
-    mockAssessmentEngine.completeSession(session.id);
+    const session = await mockAssessmentEngine.createSession(STUDENT);
+    await mockAssessmentEngine.completeSession(session.id, STUDENT);
     renderRunner(session.id);
 
     await waitFor(() =>
@@ -154,13 +170,13 @@ describe("AssessmentRunner", () => {
 
   it("offers a calm resume for a paused session and restores the question", async () => {
     const user = userEvent.setup();
-    const created = mockAssessmentEngine.createSession();
-    const session = mockAssessmentEngine.submitAnswer({
+    const created = await mockAssessmentEngine.createSession(STUDENT);
+    const session = await mockAssessmentEngine.submitAnswer({
       sessionId: created.id,
       response: firstValidResponse(created.currentQuestion!),
       submissionId: "sub_runner_paused",
-    });
-    mockAssessmentEngine.pauseSession(session.id);
+    }, STUDENT);
+    await mockAssessmentEngine.pauseSession(session.id, STUDENT);
     renderRunner(session.id);
 
     expect(await screen.findByRole("heading", { name: "Continue your assessment" })).toBeTruthy();

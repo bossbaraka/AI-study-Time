@@ -10,9 +10,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, type ReactNode } from "react";
 import { AssessmentResults } from "@/features/assessment/components/assessment-results";
 import { I18nProvider } from "@/lib/i18n/provider";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
+import { authService } from "@/services/auth.service";
+import { mockAssessmentEngine } from "@/services/engines";
 import { findBankItem } from "@/services/assessment/question-bank";
 import type { AssessmentQuestion, AssessmentResponse } from "@/types/assessment";
+
+/**
+ * Owner for direct engine calls. Component tests must use the id the
+ * mock auth backend signs in (`usr_student_01`) so the service's
+ * session-resolved student matches the engine's stored owner.
+ */
+const STUDENT = "usr_student_01";
+const STUDENT_EMAIL = "layla.hassan@example.com";
+const PASSWORD = "securePass1";
 
 const { replaceMock, pushMock } = vi.hoisted(() => ({
   replaceMock: vi.fn(),
@@ -86,28 +96,31 @@ function correctResponse(question: AssessmentQuestion): AssessmentResponse {
 }
 
 /** Plays a full session answering everything correctly → completed. */
-function playCompletedSession(): string {
-  let session = mockAssessmentEngine.createSession();
+async function playCompletedSession(): Promise<string> {
+  let session = await mockAssessmentEngine.createSession(STUDENT);
   let guard = 0;
   while (session.status === "in_progress" && session.currentQuestion && guard < 20) {
-    session = mockAssessmentEngine.submitAnswer({
+    session = await mockAssessmentEngine.submitAnswer({
       sessionId: session.id,
       response: correctResponse(session.currentQuestion),
       submissionId: `sub_${guard}`,
-    });
+    }, STUDENT);
     guard += 1;
   }
   return session.id;
 }
 
 describe("AssessmentResults", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     replaceMock.mockClear();
+    // Assessment is now student-owned: the service resolves the owner
+    // from the session, so the component tests must sign one in.
+    await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
     pushMock.mockClear();
   });
 
   it("renders the diagnostic summary with strengths and a recommended start", async () => {
-    const sessionId = playCompletedSession();
+    const sessionId = await playCompletedSession();
     renderResults(sessionId);
 
     expect(await screen.findByRole("heading", { name: /What Mureeh learned/i })).toBeTruthy();
@@ -119,7 +132,7 @@ describe("AssessmentResults", () => {
   });
 
   it("uses supportive insight language, never shame language", async () => {
-    const sessionId = playCompletedSession();
+    const sessionId = await playCompletedSession();
     renderResults(sessionId);
     await screen.findByRole("heading", { name: /What Mureeh learned/i });
 
@@ -130,7 +143,7 @@ describe("AssessmentResults", () => {
 
   it("hands off to Goal Discovery via the navigation contract only", async () => {
     const user = userEvent.setup();
-    const sessionId = playCompletedSession();
+    const sessionId = await playCompletedSession();
     renderResults(sessionId);
 
     await user.click(await screen.findByRole("button", { name: "Continue" }));
@@ -139,7 +152,7 @@ describe("AssessmentResults", () => {
 
   it("offers a way back to the session when results are not ready", async () => {
     const user = userEvent.setup();
-    const session = mockAssessmentEngine.createSession();
+    const session = await mockAssessmentEngine.createSession(STUDENT);
     renderResults(session.id);
 
     expect(await screen.findByText("Your results are not ready yet.")).toBeTruthy();
@@ -157,7 +170,7 @@ describe("AssessmentResults", () => {
   });
 
   it("does not present a bare numeric score", async () => {
-    const sessionId = playCompletedSession();
+    const sessionId = await playCompletedSession();
     renderResults(sessionId);
     await screen.findByRole("heading", { name: /What Mureeh learned/i });
 

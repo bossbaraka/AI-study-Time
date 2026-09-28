@@ -1,10 +1,11 @@
 /**
- * Deterministic Roadmap Engine (§4/§17) — the mock-phase planner.
+ * Deterministic Roadmap Engine (§4/§17) — the roadmap planner.
  *
- * Isolated from React and independently testable, exactly like the auth,
- * assessment and goal engines. A future AIRoadmapPlanner replaces this
- * module behind the identical `roadmap.service.ts` contract without any
- * UI change.
+ * Isolated from React, storage and transport, and independently testable.
+ * Storage is reached through the injected `RoadmapStore` port and the
+ * locked goal through the `GoalLookup` port, so this module imports no
+ * other engine. A future AIRoadmapPlanner replaces the planning steps
+ * behind the identical `roadmap.service.ts` contract without any UI change.
  *
  * Pipeline (all steps deterministic — same LockedGoal + diagnosis ⇒
  * same roadmap for the same engine version):
@@ -21,7 +22,8 @@
  */
 
 import { ApiError } from "@/lib/api/client";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import type { GoalLookup } from "@/services/ports/lookups";
+import type { RoadmapStore } from "@/services/ports/stores";
 import {
   ALLOCATION_POLICY,
   buildCustomCapabilities,
@@ -50,8 +52,6 @@ import type {
 } from "@/types/roadmap";
 
 export const ENGINE_VERSION = "roadmap-engine/1.0.0";
-
-const STORAGE_KEY = "mureeh.mock.roadmaps.v1";
 
 /**
  * Starting-level → position on the 0–5 target scale (roadmap policy,
@@ -82,34 +82,6 @@ const TARGET_LEVEL_PHRASES_EN: Record<(typeof TARGET_LEVELS)[number], string> = 
   master_advanced: "mastering advanced topics",
 };
 
-/* ------------------------------------------------------------------ */
-/* Persistence (mirrors the goal-engine mock pattern)                  */
-/* ------------------------------------------------------------------ */
-
-let memoryStore: Roadmap[] = [];
-
-function loadRoadmaps(): Roadmap[] {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return memoryStore;
-    const parsed = JSON.parse(raw) as Roadmap[];
-    if (!Array.isArray(parsed)) return memoryStore;
-    memoryStore = parsed;
-    return memoryStore;
-  } catch {
-    return memoryStore;
-  }
-}
-
-function saveRoadmaps(roadmaps: Roadmap[]): void {
-  memoryStore = roadmaps;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(roadmaps));
-  } catch {
-    // Storage unavailable: memory-only is acceptable for the mock phase.
-  }
-}
-
 function cloneRoadmap(roadmap: Roadmap): Roadmap {
   return JSON.parse(JSON.stringify(roadmap)) as Roadmap;
 }
@@ -126,8 +98,12 @@ function newRoadmapId(): string {
   return `rm_${random}`;
 }
 
-function ownRoadmap(roadmaps: Roadmap[], roadmapId: string, studentId: string): Roadmap {
-  const roadmap = roadmaps.find((entry) => entry.id === roadmapId);
+async function ownRoadmap(
+  store: RoadmapStore,
+  roadmapId: string,
+  studentId: string,
+): Promise<Roadmap> {
+  const roadmap = await store.findById(roadmapId);
   // Same discipline as the goal engine: existence is never leaked across
   // students — a foreign id is indistinguishable from a missing one.
   if (!roadmap || roadmap.studentId !== studentId) {
@@ -540,10 +516,14 @@ function generationKeyFor(studentId: string, goal: LearningGoal): string {
   return `${studentId}:${goal.id}:${goal.version}:${ENGINE_VERSION}`;
 }
 
-function loadLockedGoal(goalId: string, studentId: string): LearningGoal {
+async function loadLockedGoal(
+  goals: GoalLookup,
+  goalId: string,
+  studentId: string,
+): Promise<LearningGoal> {
   let goal: LearningGoal;
   try {
-    goal = mockGoalEngine.getGoal(goalId, studentId);
+    goal = await goals.getGoal(goalId, studentId);
   } catch (error) {
     // The goal engine guards ownership with its own typed errors.
     if (error instanceof ApiError && error.code === "goal_not_found") {
@@ -557,20 +537,32 @@ function loadLockedGoal(goalId: string, studentId: string): LearningGoal {
   return goal;
 }
 
-export const mockRoadmapEngine = {
+export interface RoadmapEngineDeps {
+  roadmaps: RoadmapStore;
+  /** Read side of the goal domain — breaks the engine→engine import. */
+  goals: GoalLookup;
+}
+
+export function createRoadmapEngine(deps: RoadmapEngineDeps) {
+  const store = deps.roadmaps;
+  const goals = deps.goals;
+
+  return {
   /**
    * Generates (or replays) the roadmap for a locked goal.
    * Idempotent on studentId + goalId + goalVersion + engineVersion (§19).
    */
-  generateRoadmap(goalId: string, studentId: string): RoadmapGenerationResult {
-    const roadmaps = loadRoadmaps();
-    const goal = loadLockedGoal(goalId, studentId);
+  async generateRoadmap(
+    goalId: string,
+    studentId: string,
+  ): Promise<RoadmapGenerationResult> {
+    const goal = await loadLockedGoal(goals, goalId, studentId);
     const generationKey = generationKeyFor(studentId, goal);
 
     // Idempotent replay: identical request → identical roadmap, no duplicate.
-    const existing = roadmaps.find(
-      (entry) =>
-        entry.studentId === studentId && entry.generationContext.generationKey === generationKey,
+    const owned = await store.listByStudent(studentId);
+    const existing = owned.find(
+      (entry) => entry.generationContext.generationKey === generationKey,
     );
     if (existing) {
       return { roadmap: cloneRoadmap(existing), created: false };
@@ -580,13 +572,17 @@ export const mockRoadmapEngine = {
     // never mutated in place (§20). Versions increase monotonically per
     // student: 1 + the highest version ever generated.
     let version = 1;
-    for (const entry of roadmaps) {
-      if (entry.studentId !== studentId) continue;
+    // Collected rather than written here: the supersede and the insert have
+    // to commit together, so neither happens until the new plan is built and
+    // has passed validation.
+    const superseded: Roadmap[] = [];
+    for (const entry of owned) {
       version = Math.max(version, entry.version + 1);
       if (["draft", "active", "paused"].includes(entry.status)) {
         assertTransition(entry.status, "revised");
         entry.status = "revised";
         entry.updatedAt = nowIso();
+        superseded.push(entry);
       }
     }
 
@@ -640,55 +636,53 @@ export const mockRoadmapEngine = {
     const first = roadmap.milestones[0];
     if (first) first.status = "in_progress";
 
-    roadmaps.push(roadmap);
-    saveRoadmaps(roadmaps);
+    // One transaction (§13). Written separately, a failure between the two
+    // would leave the student with either two live plans or none at all —
+    // and `getActiveRoadmap` picks "newest live", so both are visible bugs.
+    await store.transaction(async () => {
+      for (const entry of superseded) await store.upsert(entry);
+      await store.upsert(roadmap);
+    });
     return { roadmap: cloneRoadmap(roadmap), created: true };
   },
 
   /** The student's live roadmap (draft/active/paused), newest first. */
-  getActiveRoadmap(studentId: string): Roadmap | null {
-    const roadmaps = loadRoadmaps();
+  async getActiveRoadmap(studentId: string): Promise<Roadmap | null> {
     let active: Roadmap | undefined;
-    for (const roadmap of roadmaps) {
-      if (roadmap.studentId !== studentId) continue;
+    for (const roadmap of await store.listByStudent(studentId)) {
       if (!["draft", "active", "paused"].includes(roadmap.status)) continue;
       if (!active || roadmap.createdAt >= active.createdAt) active = roadmap;
     }
     return active ? cloneRoadmap(active) : null;
   },
 
-  getRoadmap(roadmapId: string, studentId: string): Roadmap {
-    const roadmaps = loadRoadmaps();
-    return cloneRoadmap(ownRoadmap(roadmaps, roadmapId, studentId));
+  async getRoadmap(roadmapId: string, studentId: string): Promise<Roadmap> {
+    return cloneRoadmap(await ownRoadmap(store, roadmapId, studentId));
   },
 
-  pauseRoadmap(roadmapId: string, studentId: string): Roadmap {
-    const roadmaps = loadRoadmaps();
-    const roadmap = ownRoadmap(roadmaps, roadmapId, studentId);
+  async pauseRoadmap(roadmapId: string, studentId: string): Promise<Roadmap> {
+    const roadmap = await ownRoadmap(store, roadmapId, studentId);
     assertTransition(roadmap.status, "paused");
     roadmap.status = "paused";
     roadmap.updatedAt = nowIso();
-    saveRoadmaps(roadmaps);
+    await store.upsert(roadmap);
     return cloneRoadmap(roadmap);
   },
 
-  resumeRoadmap(roadmapId: string, studentId: string): Roadmap {
-    const roadmaps = loadRoadmaps();
-    const roadmap = ownRoadmap(roadmaps, roadmapId, studentId);
+  async resumeRoadmap(roadmapId: string, studentId: string): Promise<Roadmap> {
+    const roadmap = await ownRoadmap(store, roadmapId, studentId);
     assertTransition(roadmap.status, "active");
     roadmap.status = "active";
     roadmap.updatedAt = nowIso();
-    saveRoadmaps(roadmaps);
+    await store.upsert(roadmap);
     return cloneRoadmap(roadmap);
   },
 
-  /** Test helper: clears persisted mock state. */
-  __reset(): void {
-    memoryStore = [];
-    try {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // Ignore unavailable storage in non-browser contexts.
-    }
+  /** Test seam: clears this engine's persisted roadmaps. */
+  async __reset(): Promise<void> {
+    await store.clear();
   },
-};
+  };
+}
+
+export type RoadmapEngine = ReturnType<typeof createRoadmapEngine>;

@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { authService } from "@/services/auth.service";
 import { GoalApiError, goalDiscoveryService } from "@/services/goal-discovery.service";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockGoalEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 
 const PASSWORD = "securePass1";
@@ -28,7 +28,7 @@ function strongInput(): GoalDiscoveryInput {
 }
 
 beforeEach(async () => {
-  mockGoalEngine.__reset();
+  await mockGoalEngine.__reset();
   await authService.logout().catch(() => undefined);
 });
 
@@ -96,8 +96,12 @@ describe("goalDiscoveryService — student flow", () => {
     });
 
     // A goal created under a different student id is unreachable.
-    mockGoalEngine.createGoal(strongInput(), { studentId: "student_other", idempotencyKey: "k" });
-    const foreign = mockGoalEngine.getActiveGoal("student_other");
+    await mockGoalEngine.createGoal(strongInput(), {
+      studentId: "student_other",
+      idempotencyKey: "k",
+      diagnosisContext: null,
+    });
+    const foreign = await mockGoalEngine.getActiveGoal("student_other");
     await expect(goalDiscoveryService.getGoal(foreign!.id)).rejects.toMatchObject({
       goalCode: "forbidden",
       status: 403,

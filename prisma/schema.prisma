@@ -1,11 +1,20 @@
 // ================================================================
 // MUREEH OFFICIAL AUTH GATEWAY — persistent store
-// SQLite via Prisma. Swap for Postgres later by editing the
-// datasource only; no application code changes.
+//
+// PostgreSQL via Prisma. Prisma is the persistence abstraction: the
+// application talks to the Prisma client only, so any PostgreSQL
+// provider (managed or self-hosted) works by editing `DATABASE_URL`
+// alone — no application code changes.
 // ================================================================
 
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
+  // Driver-adapter engine: queries are compiled by the WASM query compiler
+  // shipped with @prisma/client and executed through @prisma/adapter-pg.
+  // No native query-engine binary is fetched at install time, and the
+  // PostgreSQL driver is an explicit application dependency instead of a
+  // hidden engine download.
+  engineType = "client"
 }
 
 datasource db {
@@ -24,7 +33,7 @@ model User {
   role              String // student | guardian | admin
   nationalId        String?   @unique
   status            String    @default("pending") // pending | active | suspended
-  emailVerification String    @default("verified") // invitation flow pre-verifies
+  emailVerification String    @default("verified") // invitation registration explicitly starts pending
   onboarding        String    @default("not-started") // drives post-auth routing
   failedAttempts    Int       @default(0)
   lockedUntil       DateTime?
@@ -35,8 +44,16 @@ model User {
   sentInvitations   Invitation[]  @relation("Inviter")
   acceptedInvite    Invitation[]  @relation("Invitee")
   auditAsActor      AuditEvent[]  @relation("Actor")
+
+  // Learning aggregates. All are owned by the student and cascade with the
+  // account: there is no orphaned learning data by design.
+  assessmentSessions AssessmentSession[]
+  goals              Goal[]
+  roadmaps           Roadmap[]
+  unitExecutions     LearningUnitExecution[]
   auditAsSubject    AuditEvent[]  @relation("Subject")
   resetTokens       PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
 }
 
 /// Server-side sessions. Only the SHA-256 of the cookie token is
@@ -86,6 +103,20 @@ model PasswordResetToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
+/// Single-use email verification token. Only the SHA-256 hash is persisted.
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
 /// Append-only audit trail for every security-relevant action.
 model AuditEvent {
   id        String   @id @default(cuid())
@@ -103,16 +134,287 @@ model AuditEvent {
   @@index([createdAt])
 }
 
-/// Internal dev outbox — stands in for the future email gateway.
-/// Links (verification/reset) are delivered here in this environment;
-/// the seam is the writer: swap the insert for a real mail transport.
+/// Auth email delivery history. Production sends via SMTP and tracks each
+/// attempt; development/tests keep a local outbox. Production message bodies
+/// redact one-time tokens and invitation codes.
 model OutboxMessage {
-  id        String   @id @default(cuid())
-  to        String
-  subject   String
-  body      String
-  kind      String // invite | reset | welcome
-  createdAt DateTime @default(now())
+  id                String    @id @default(cuid())
+  to                String
+  subject           String
+  body              String
+  kind              String // invite | reset | welcome | verification
+  deliveryStatus    String    @default("pending") // pending | sent | failed
+  deliveryAttempts  Int       @default(0)
+  deliveredAt       DateTime?
+  lastDeliveryError String? // safe category only; never provider text
+  createdAt         DateTime  @default(now())
 
   @@index([createdAt])
+}
+
+// ================================================================
+// LEARNING DOMAIN — Phase 2 persistence
+//
+// Only aggregates that already have a domain engine, a persistence port
+// and tests are modelled here. Concepts without an implemented domain
+// (missions, recall, tests, mastery, recovery, behaviour, mentor,
+// achievements) are deliberately NOT modelled — see
+// docs/PHASE_2_REPORT.md §3 for the classification and where each belongs.
+//
+// Value objects are stored as Json on their aggregate root: they have no
+// independent identity, lifecycle or query pattern, so giving them tables
+// would be modelling for its own sake.
+// ================================================================
+
+/// A diagnostic assessment session. Owned by exactly one student.
+///
+/// `topicState` is the engine's incremental coverage accumulator; it is
+/// written atomically with the session, never partially.
+model AssessmentSession {
+  id          String    @id @default(cuid())
+  studentId   String
+  student     User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  /// in_progress | paused | completed | expired
+  status      String    @default("in_progress")
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  /// Per-topic { asked, points, lastDifficulty, lastPoints }. Engine-owned.
+  topicState  Json      @default("{}")
+  lastTopic   String?
+  /// Diagnostic profile supplied before starting, when present.
+  profile     Json?
+  /// Topic ids this session draws from (static bank or generated set).
+  sessionTopics String[] @default([])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  questions   AssessmentQuestion[]
+  answers     AssessmentAnswer[]
+
+  // getActiveSession: the student's unfinished session.
+  @@index([studentId, status])
+  // getLatestCompletedResult: newest completed diagnosis.
+  @@index([studentId, completedAt(sort: Desc)])
+}
+
+/// One question in a session's bank.
+///
+/// SECURITY: `scoring` is the ANSWER KEY. It lives in its own column on its
+/// own table so the internal/public boundary is structural rather than a
+/// convention someone has to remember. Only `question` may ever be served.
+model AssessmentQuestion {
+  id         String            @id @default(cuid())
+  sessionId  String
+  session    AssessmentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  /// The engine's question id. Deterministic ids (e.g. `fn_f1`) repeat
+  /// across sessions, so uniqueness is scoped to the session.
+  questionId String
+  topic      String
+  difficulty String
+  /// Public content: prompt, instructions, context, options. Safe to serve.
+  question   Json
+  /// INTERNAL answer key: { kind, correctOptionId } | { kind, keywords, minMatches }.
+  scoring    Json
+
+  answers    AssessmentAnswer[]
+
+  @@unique([sessionId, questionId])
+}
+
+/// One graded response.
+///
+/// `points` is computed by the engine from `AssessmentQuestion.scoring`.
+/// There is no client-writable correctness column anywhere in this schema.
+model AssessmentAnswer {
+  id           String             @id @default(cuid())
+  sessionId    String
+  session      AssessmentSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  assessmentQuestionId String
+  question     AssessmentQuestion @relation(fields: [assessmentQuestionId], references: [id], onDelete: Cascade)
+  /// Client-generated idempotency key. The unique constraint below is what
+  /// makes a retried submission safe under concurrency — not an
+  /// `if (!existing)` check in application code.
+  submissionId String
+  /// The student's response ONLY: { type, questionId, optionId | answer }.
+  response     Json
+  /// 1 correct · 0.5 partial · 0 incorrect. Server-derived.
+  points       Float
+  difficulty   String
+  questionType String
+  submittedAt  DateTime           @default(now())
+
+  @@unique([sessionId, submissionId])
+  @@index([sessionId])
+}
+
+/// A learning goal. Owned by exactly one student.
+///
+/// `version` is bumped on every accepted mutation and is the optimistic
+/// concurrency token. The two idempotency keys have partial-unique
+/// semantics: NULL means "no key supplied", and PostgreSQL treats NULLs as
+/// distinct, so keyless goals never collide.
+model Goal {
+  id                   String    @id @default(cuid())
+  studentId            String
+  student              User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  /// discovered | validated | needs_revision | locked | revised | archived
+  status               String    @default("discovered")
+  desiredOutcome       String
+  currentLevel         String
+  targetLevel          String
+  motivation           Json
+  targetDomain         Json
+  timeframe            Json
+  weeklyCommitment     Json
+  constraints          String[]  @default([])
+  successCriteria      String[]  @default([])
+  /// Diagnosis snapshot at creation time, when the student had one.
+  diagnosisContext     Json?
+  /// Latest engine validation, persisted with the goal.
+  validation           Json?
+  version              Int       @default(1)
+  createIdempotencyKey String?
+  lockIdempotencyKey   String?
+  revisesGoalId        String?
+  revisesGoal          Goal?     @relation("GoalRevision", fields: [revisesGoalId], references: [id])
+  revisions            Goal[]    @relation("GoalRevision")
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  lockedAt             DateTime?
+
+  roadmaps             Roadmap[]
+
+  @@unique([studentId, createIdempotencyKey])
+  @@unique([studentId, lockIdempotencyKey])
+  // getActiveGoal: the student's current non-terminal goal.
+  @@index([studentId, status])
+}
+
+/// A generated learning path for one locked goal.
+///
+/// `generationKey` (studentId:goalId:goalVersion:engineVersion) is the
+/// idempotency anchor. It was previously enforced by an in-memory scan,
+/// which races; the unique constraint makes a concurrent duplicate
+/// generation impossible. `@@unique([studentId, version])` does the same
+/// for the monotonic version counter.
+model Roadmap {
+  id                  String    @id @default(cuid())
+  studentId           String
+  student             User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  goalId              String
+  goal                Goal      @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  version             Int       @default(1)
+  /// draft | active | paused | completed | revised
+  status              String    @default("draft")
+  title               String
+  description         String
+  weeklyCommitment    Float
+  totalEstimatedHours Float
+  estimatedDuration   Json
+  timeFeasibility     Json
+  /// { goalVersion, engineVersion, diagnosisSessionId?, generationKey,
+  ///    availableHours, requiredHours }
+  generationContext   Json
+  generationKey       String    @unique
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  milestones          RoadmapMilestone[]
+  learningUnits       LearningUnit[]
+  executions          LearningUnitExecution[]
+
+  @@unique([studentId, version])
+  // getActiveRoadmap: the student's current path.
+  @@index([studentId, status])
+  @@index([goalId])
+}
+
+/// An ordered milestone within one roadmap.
+///
+/// The domain id (`ms_<capabilityId>`) is deterministic and therefore
+/// REPEATS across roadmap versions, so it cannot be the primary key. It is
+/// kept as `milestoneId`, unique within its roadmap, and referenced by that
+/// pair from learning units and executions.
+model RoadmapMilestone {
+  id              String   @id @default(cuid())
+  roadmapId       String
+  roadmap         Roadmap  @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  /// Domain id, stable and readable. Unique per roadmap only.
+  milestoneId     String
+  capabilityId    String
+  title           String
+  description     String
+  order           Int
+  status          String
+  learningOutcome String
+  estimatedHours  Float
+  goalAlignment   String
+  maintenance     Boolean  @default(false)
+  /// Milestone domain ids that must come first (prerequisite closure).
+  dependencies    String[] @default([])
+  checkpoint      Json
+
+  learningUnits   LearningUnit[]
+
+  @@unique([roadmapId, milestoneId])
+  @@unique([roadmapId, order])
+}
+
+/// An ordered learning unit inside a milestone.
+///
+/// Same reasoning as milestones: the domain id
+/// (`unit_<capabilityId>_<slotType>`) is deterministic and repeats across
+/// roadmap versions.
+model LearningUnit {
+  id                 String           @id @default(cuid())
+  roadmapId          String
+  roadmap            Roadmap          @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  milestoneId        String
+  milestone          RoadmapMilestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+  /// Domain id, unique within the roadmap.
+  unitId             String
+  type               String
+  order              Int
+  title              String
+  purpose            String
+  estimatedMinutes   Int
+  expectedOutcome    String
+  completionEvidence String
+
+  executions         LearningUnitExecution[]
+
+  @@unique([roadmapId, unitId])
+  @@unique([milestoneId, order])
+  @@index([roadmapId])
+}
+
+/// A student's attempt at one learning unit in one roadmap.
+///
+/// One record per (roadmap, unit): a retry mutates the existing record
+/// rather than appending, so the unique constraint below encodes a real
+/// domain invariant. An execution cannot reference a unit that does not
+/// exist in its roadmap — the composite foreign key enforces that.
+model LearningUnitExecution {
+  id             String       @id @default(cuid())
+  studentId      String
+  student        User         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  roadmapId      String
+  roadmap        Roadmap      @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  milestoneId    String
+  /// Learning unit DOMAIN id, paired with roadmapId.
+  learningUnitId String
+  learningUnit   LearningUnit @relation(fields: [roadmapId, learningUnitId], references: [roadmapId, unitId], onDelete: Cascade)
+  /// in_progress | submitted | evaluated
+  status         String
+  startedAt      DateTime?
+  submittedAt    DateTime?
+  evaluatedAt    DateTime?
+  evidence       Json?
+  result         Json?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([roadmapId, learningUnitId])
+  @@index([studentId, status])
+  @@index([roadmapId])
 }

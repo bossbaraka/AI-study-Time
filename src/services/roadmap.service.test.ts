@@ -6,9 +6,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { authService } from "@/services/auth.service";
 import { goalDiscoveryService } from "@/services/goal-discovery.service";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockGoalEngine } from "@/services/engines";
 import { RoadmapApiError, roadmapService } from "@/services/roadmap.service";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockRoadmapEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 
 const PASSWORD = "securePass1";
@@ -41,8 +41,8 @@ async function lockedGoalId(): Promise<string> {
 }
 
 beforeEach(async () => {
-  mockRoadmapEngine.__reset();
-  mockGoalEngine.__reset();
+  await mockRoadmapEngine.__reset();
+  await mockGoalEngine.__reset();
   await authService.logout().catch(() => undefined);
 });
 
@@ -115,12 +115,13 @@ describe("roadmapService — student flow", () => {
   it("hides other students' roadmaps behind 404s", async () => {
     await loginStudent();
     // A roadmap generated for a different student id, straight in the engine.
-    const foreignGoal = mockGoalEngine.createGoal(jsInput(), {
+    const foreignGoal = (await mockGoalEngine.createGoal(jsInput(), {
       studentId: "student_other",
       idempotencyKey: "key-foreign",
-    }).goal;
-    const foreignLocked = mockGoalEngine.lockGoal(foreignGoal.id, "student_other", "lock-foreign");
-    const foreign = mockRoadmapEngine.generateRoadmap(foreignLocked.id, "student_other").roadmap;
+      diagnosisContext: null,
+    })).goal;
+    const foreignLocked = await mockGoalEngine.lockGoal(foreignGoal.id, "student_other", "lock-foreign");
+    const foreign = (await mockRoadmapEngine.generateRoadmap(foreignLocked.id, "student_other")).roadmap;
 
     await expect(roadmapService.getRoadmap(foreign.id)).rejects.toMatchObject({
       roadmapCode: "roadmap_not_found",

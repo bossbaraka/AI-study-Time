@@ -12,7 +12,7 @@ import {
 } from "@/services/goals/active-goal-projection";
 import { goalDiscoveryService } from "@/services/goal-discovery.service";
 import { goalService } from "@/services/journey.service";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
+import { mockGoalEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 
 const PASSWORD = "securePass1";
@@ -41,7 +41,7 @@ async function lockRealGoal(): Promise<string> {
 }
 
 beforeEach(async () => {
-  mockGoalEngine.__reset();
+  await mockGoalEngine.__reset();
   await authService.logout().catch(() => undefined);
 });
 
@@ -49,7 +49,7 @@ describe("projectLockedGoal — pure projection", () => {
   it("maps a locked goal into the legacy dashboard shape honestly", async () => {
     await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
     const goalId = await lockRealGoal();
-    const locked = mockGoalEngine.getGoal(goalId, (await authService.getSessionState()).session!.user.id);
+    const locked = await mockGoalEngine.getGoal(goalId, (await authService.getSessionState()).session!.user.id);
 
     const projected = projectLockedGoal(locked);
     expect(projected.id).toBe(locked.id);

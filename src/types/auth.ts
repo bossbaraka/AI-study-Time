@@ -96,15 +96,8 @@ export interface AuthResponse {
   session: Session;
 }
 
-/**
- * Registration never auto-signs-in. The UI routes on this discriminator
- * instead of guessing: `verification-required` is the mock flow, while
- * `active` is the gateway flow — the institutional invitation itself is
- * the verification, so an invited account is usable immediately.
- */
-export type RegisterResponse =
-  | { status: "verification-required"; email: string }
-  | { status: "active"; email: string };
+/** Registration never auto-signs-in; every invited account must verify its email. */
+export type RegisterResponse = { status: "verification-required"; email: string };
 
 /**
  * Password recovery responses are intentionally indistinguishable.

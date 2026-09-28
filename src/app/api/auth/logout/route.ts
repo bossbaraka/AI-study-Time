@@ -3,6 +3,7 @@ import {
   clearSessionCookie,
   csrfRejected,
   errorResponse,
+  failureContext,
   forbiddenResponse,
   gateway,
   readSessionToken,
@@ -14,12 +15,13 @@ export const dynamic = "force-dynamic";
 
 /** POST /api/auth/logout — revokes the session row and clears the cookie. */
 export async function POST(req: Request): Promise<NextResponse> {
+  const failure = failureContext(req, "auth");
   if (csrfRejected(req)) return forbiddenResponse();
   try {
     await gateway.logout(await readSessionToken(), requestMeta(req));
     const res = new NextResponse(null, { status: 204 });
     return clearSessionCookie(res);
   } catch (error) {
-    return await errorResponse(error);
+    return await errorResponse(error, failure);
   }
 }

@@ -7,6 +7,9 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/server/db";
+import { PersistenceConflictError } from "@/services/ports/stores";
+import { dbErrorCategory, isDatabaseUnavailable } from "@/services/infrastructure/prisma/context";
+import { mapDomainError } from "@/lib/server/domain-errors";
 import { AuthGatewayError, createGateway, SESSION_TTL_SEC } from "@/lib/server/auth/gateway";
 import type { AuthUser } from "@/types/auth";
 
@@ -71,13 +74,66 @@ export function invalidRequestResponse(): NextResponse {
   return NextResponse.json({ code: "unknown" }, { status: 400 });
 }
 
-export async function errorResponse(error: unknown): Promise<NextResponse> {
+/** What the failure log needs to be actionable (§29). */
+export interface FailureContext {
+  operation: string;
+  requestId: string;
+  userId?: string;
+  startedAt: number;
+}
+
+export async function errorResponse(
+  error: unknown,
+  context?: FailureContext,
+): Promise<NextResponse> {
   if (error instanceof AuthGatewayError) {
     return NextResponse.json({ code: error.code }, { status: error.status });
   }
+  // A rejected write, not a broken server: a concurrent writer claimed the
+  // same idempotency key, or the row moved underneath us. Retryable by the
+  // client, and never reported as a 500.
+  if (error instanceof PersistenceConflictError) {
+    logFailure(error, context, 409);
+    return NextResponse.json({ code: "conflict" }, { status: 409 });
+  }
+  // The database is not reachable. Fail explicitly (§25): the client is told
+  // the service is unavailable rather than being handed an empty result that
+  // looks like "this student has no data".
+  if (isDatabaseUnavailable(error)) {
+    logFailure(error, context, 503);
+    return NextResponse.json({ code: "service_unavailable" }, { status: 503 });
+  }
+  // Domain errors that already carry their own classification keep it
+  // (§12). Only the code crosses the boundary, never a message: the client
+  // maps codes to translation keys, and a message could carry internals.
+  const mapped = mapDomainError(error);
+  if (mapped) {
+    if (mapped.status >= 500) logFailure(error, context, mapped.status);
+    return NextResponse.json({ code: mapped.code }, { status: mapped.status });
+  }
   // Anything else is an internal failure: log server-side, never forward.
-  console.error("[auth-gateway] unexpected error:", error instanceof Error ? error.name : error);
+  logFailure(error, context, 500);
   return NextResponse.json({ code: "unknown" }, { status: 500 });
+}
+
+/**
+ * One structured line per failure (§29).
+ *
+ * Deliberately narrow: the category, never the driver's message. A Prisma
+ * error carries the failing query, which carries column names and sometimes
+ * the values bound to them — exactly what must not reach a log aggregator.
+ */
+function logFailure(error: unknown, context: FailureContext | undefined, status: number): void {
+  const entry = {
+    event: "request_failed",
+    status,
+    category: dbErrorCategory(error),
+    operation: context?.operation ?? "unknown",
+    requestId: context?.requestId ?? "unknown",
+    userId: context?.userId ?? null,
+    durationMs: context ? Math.round(performance.now() - context.startedAt) : null,
+  };
+  console.error(JSON.stringify(entry));
 }
 
 /* ------------------------------------------------------------------ */
@@ -125,6 +181,20 @@ export async function requireAdminApi(): Promise<AuthUser> {
 }
 
 /**
+ * API gate: returns the signed-in STUDENT or throws a typed 401/403.
+ *
+ * This is the ownership anchor for every student-owned resource: handlers
+ * receive the id from the session cookie, so a crafted request can never
+ * name another student.
+ */
+export async function requireStudentApi(): Promise<AuthUser> {
+  const user = await serverUser();
+  if (!user) throw new AuthGatewayError("session_expired", 401);
+  if (user.role !== "student") throw new AuthGatewayError("forbidden", 403);
+  return user;
+}
+
+/**
  * Standard admin route wrapper: CSRF check for writes, real session →
  * role check, typed error funnel. The only place admin handlers begin.
  */
@@ -133,10 +203,40 @@ export async function withAdmin(
   fn: (admin: AuthUser) => Promise<NextResponse>,
 ): Promise<NextResponse> {
   if (csrfRejected(req)) return forbiddenResponse();
+  const context = failureContext(req, "admin");
   try {
     const admin = await requireAdminApi();
+    context.userId = admin.id;
     return await fn(admin);
   } catch (error) {
-    return await errorResponse(error);
+    return await errorResponse(error, context);
   }
+}
+
+/**
+ * Standard student route wrapper: CSRF check for writes, real session →
+ * student role check, typed error funnel. Recognized domain errors are mapped
+ * by `mapDomainError` without flattening their stable public code.
+ */
+export async function withStudent(
+  req: Request,
+  fn: (student: AuthUser) => Promise<NextResponse>,
+): Promise<NextResponse> {
+  if (csrfRejected(req)) return forbiddenResponse();
+  const context = failureContext(req, "student");
+  try {
+    const student = await requireStudentApi();
+    context.userId = student.id;
+    return await fn(student);
+  } catch (error) {
+    return await errorResponse(error, context);
+  }
+}
+
+export function failureContext(req: Request, scope: string): FailureContext {
+  return {
+    operation: `${scope} ${new URL(req.url).pathname}`,
+    requestId: req.headers.get("x-request-id") ?? crypto.randomUUID(),
+    startedAt: performance.now(),
+  };
 }

@@ -37,11 +37,15 @@ const passwordField = z
 /**
  * Login accepts any non-empty password: policy enforcement belongs to
  * registration/reset. Re-validating policy at login would leak which
- * passwords could never have been registered.
+ * passwords could never have been registered. The upper bound still matches
+ * the maximum accepted at registration and bounds password-hash work.
  */
 export const loginSchema = z.object({
   email: emailField,
-  password: z.string().min(1, "auth.errors.required"),
+  password: z
+    .string()
+    .min(1, "auth.errors.required")
+    .max(PASSWORD_POLICY.maxLength, "auth.errors.passwordMin"),
 });
 
 export const registerSchema = z

@@ -14,9 +14,9 @@ import { LearnIndexFlow } from "@/features/execution/components/learn-index-flow
 import { UnitLearnFlow } from "@/features/execution/components/unit-learn-flow";
 import { I18nProvider } from "@/lib/i18n/provider";
 import { authService } from "@/services/auth.service";
-import { mockExecutionEngine } from "@/services/execution/mock-execution-engine";
-import { mockGoalEngine } from "@/services/goals/mock-goal-engine";
-import { mockRoadmapEngine } from "@/services/roadmap/mock-roadmap-engine";
+import { mockExecutionEngine } from "@/services/engines";
+import { mockGoalEngine } from "@/services/engines";
+import { mockRoadmapEngine } from "@/services/engines";
 import type { GoalDiscoveryInput } from "@/types/goal";
 import type { Roadmap } from "@/types/roadmap";
 
@@ -82,20 +82,21 @@ function renderFlow(unitId?: string) {
 }
 
 async function seedRoadmap(): Promise<void> {
-  const created = mockGoalEngine.createGoal(jsInput(), {
+  const created = await mockGoalEngine.createGoal(jsInput(), {
     studentId,
     idempotencyKey: `ui-${Math.random()}`,
+    diagnosisContext: null,
   });
-  const locked = mockGoalEngine.lockGoal(created.goal.id, studentId, `ui-lock-${Math.random()}`);
-  roadmap = mockRoadmapEngine.generateRoadmap(locked.id, studentId).roadmap;
+  const locked = await mockGoalEngine.lockGoal(created.goal.id, studentId, `ui-lock-${Math.random()}`);
+  roadmap = (await mockRoadmapEngine.generateRoadmap(locked.id, studentId)).roadmap;
 }
 
 beforeEach(async () => {
   window.localStorage.removeItem("mureeh.locale");
   vi.clearAllMocks();
-  mockExecutionEngine.__reset();
-  mockRoadmapEngine.__reset();
-  mockGoalEngine.__reset();
+  await mockExecutionEngine.__reset();
+  await mockRoadmapEngine.__reset();
+  await mockGoalEngine.__reset();
   const { session } = await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
   studentId = session.user.id;
   await seedRoadmap();
@@ -150,7 +151,7 @@ describe("learn screen — evidence & evaluation (§8/§9)", () => {
     expect(await screen.findByText(/Add your solution before submitting/i)).toBeDefined();
     expect(screen.getByText(/Add why it works before submitting/i)).toBeDefined();
     // State unchanged — still in progress.
-    expect(mockExecutionEngine.getExecutionState(orderedUnitIds()[0]!, studentId)?.status).toBe(
+    expect((await mockExecutionEngine.getExecutionState(orderedUnitIds()[0]!, studentId))?.status).toBe(
       "in_progress",
     );
   });
@@ -208,7 +209,7 @@ describe("learn screen — evidence & evaluation (§8/§9)", () => {
     expect(await screen.findByLabelText(/My solution/i)).toBeDefined();
     expect(screen.queryByRole("button", { name: /Start learning/i })).toBeNull();
     // The record itself still says in_progress — state came from the engine.
-    expect(mockExecutionEngine.getExecutionState(orderedUnitIds()[0]!, studentId)?.status).toBe(
+    expect((await mockExecutionEngine.getExecutionState(orderedUnitIds()[0]!, studentId))?.status).toBe(
       "in_progress",
     );
   });
@@ -228,28 +229,28 @@ describe("learn screen — gating & routing (§6/§21)", () => {
   });
 
   it("without any roadmap the flow defers to /roadmap", async () => {
-    mockRoadmapEngine.__reset();
-    mockExecutionEngine.__reset();
+    await mockRoadmapEngine.__reset();
+    await mockExecutionEngine.__reset();
     renderFlow();
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/roadmap"));
   });
 
   it("/roadmap/learn resolves the ONE current unit and forwards", async () => {
     const ids = orderedUnitIds();
-    mockExecutionEngine.startLearningUnit(ids[0]!, studentId);
+    await mockExecutionEngine.startLearningUnit(ids[0]!, studentId);
     renderWithProviders(<LearnIndexFlow />);
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith(`/roadmap/learn/${ids[0]}`));
   });
 
   it("/roadmap/learn with every unit passed shows the honest done state", async () => {
     for (const id of orderedUnitIds()) {
-      mockExecutionEngine.startLearningUnit(id, studentId);
-      mockExecutionEngine.submitEvidence(
+      await mockExecutionEngine.startLearningUnit(id, studentId);
+      await mockExecutionEngine.submitEvidence(
         id,
         { solution: SOLID_SOLUTION, reasoning: SOLID_REASONING },
         studentId,
       );
-      mockExecutionEngine.evaluateExecution(id, studentId);
+      await mockExecutionEngine.evaluateExecution(id, studentId);
     }
     renderWithProviders(<LearnIndexFlow />);
     expect(await screen.findByText(/Every unit passed/i)).toBeDefined();
@@ -287,13 +288,13 @@ describe("learn screen — Arabic + RTL + accessibility (§20/§30)", () => {
   });
 
   it("keeps the result region announced (aria-live) and actions labeled", async () => {
-    mockExecutionEngine.startLearningUnit(orderedUnitIds()[0]!, studentId);
-    mockExecutionEngine.submitEvidence(
+    await mockExecutionEngine.startLearningUnit(orderedUnitIds()[0]!, studentId);
+    await mockExecutionEngine.submitEvidence(
       orderedUnitIds()[0]!,
       { solution: SOLID_SOLUTION, reasoning: SOLID_REASONING },
       studentId,
     );
-    mockExecutionEngine.evaluateExecution(orderedUnitIds()[0]!, studentId);
+    await mockExecutionEngine.evaluateExecution(orderedUnitIds()[0]!, studentId);
     renderFlow();
 
     // The skeleton is also role=status — target the result region itself.

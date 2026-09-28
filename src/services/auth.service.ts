@@ -6,7 +6,7 @@
  *
  * Transport resolution (see `AUTH_USE_GATEWAY`):
  * - Application runtime → the REAL server-side gateway (route handlers at
- *   /api/auth/*, httpOnly session cookie, Prisma+SQLite persistence).
+ *   /api/auth/*, httpOnly session cookie, Prisma+PostgreSQL persistence).
  * - Unit tests → the isolated mock backend, keeping component tests hermetic.
  */
 

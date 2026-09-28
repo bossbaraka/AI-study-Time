@@ -60,14 +60,11 @@ export function RegisterForm() {
     try {
       const { confirmPassword: _confirmPassword, ...payload } = values;
       void _confirmPassword; // Never forwarded to the service layer.
-      const result = await registerMutation.mutateAsync(payload);
+      await registerMutation.mutateAsync(payload);
       const params = new URLSearchParams({ email: values.email });
       if (nextParam) params.set(NEXT_PARAM, nextParam);
-      if (result.status === "active") {
-        // Gateway mode: the invitation was the verification — sign-in ready.
-        router.replace(`${AUTH_ROUTES.registerComplete}?${params.toString()}`);
-        return;
-      }
+      // Registration is invitation-gated but still requires the recipient to
+      // prove control of the matching email address before signing in.
       router.replace(`${AUTH_ROUTES.verifyEmail}?${params.toString()}`);
     } catch (error) {
       setSubmitError(error);

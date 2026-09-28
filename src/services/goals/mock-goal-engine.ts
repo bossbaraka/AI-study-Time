@@ -1,8 +1,11 @@
 /**
- * Mock Goal Engine — the deterministic simulation of the future AI goal
- * service. Isolated like the auth and assessment mocks: this module is the
- * ONLY place goal business rules exist in the mock phase, and it has zero
- * React dependencies (independently testable).
+ * Goal Engine — the deterministic goal domain orchestrator.
+ *
+ * This module is the ONLY place goal business rules live, and it has zero
+ * React, storage or transport dependencies (independently testable).
+ * Persistence is reached through the injected `GoalStore` port; the
+ * diagnosis snapshot is handed in by the application layer, so the engine
+ * never fetches across a domain boundary itself.
  *
  * Rules are deliberately simple, deterministic and explainable — no
  * natural-language understanding is pretended. Every verdict maps to a
@@ -17,8 +20,8 @@
  */
 
 import { ApiError } from "@/lib/api/client";
-import { mockAssessmentEngine } from "@/services/assessment/mock-assessment-engine";
 import { assertTransition, isEditable } from "@/services/goals/goal-state-machine";
+import type { GoalStore } from "@/services/ports/stores";
 import type {
   CurrentLevel,
   GoalDimensionQuality,
@@ -38,8 +41,6 @@ import type {
 /* ------------------------------------------------------------------ */
 /* Rule tables (deterministic, documented, explainable)                */
 /* ------------------------------------------------------------------ */
-
-const STORAGE_KEY = "mureeh.mock.goals.v1";
 
 /** Phrases that signal an un-specific outcome. Exact substring matches. */
 const VAGUE_PHRASES = [
@@ -114,34 +115,6 @@ const HOURS_PER_LEVEL_STEP = 60;
 const BASE_HOURS = 20;
 const AGGRESSIVE_RATIO = 0.75; // below this share of needed hours → warning
 const UNREALISTIC_RATIO = 0.4; // below this share with a long distance → error
-
-/* ------------------------------------------------------------------ */
-/* Persistence (guarded; mirrors the auth/assessment mock pattern)     */
-/* ------------------------------------------------------------------ */
-
-let memoryStore: LearningGoal[] = [];
-
-function loadGoals(): LearningGoal[] {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return memoryStore;
-    const parsed = JSON.parse(raw) as LearningGoal[];
-    if (!Array.isArray(parsed)) return memoryStore;
-    memoryStore = parsed;
-    return memoryStore;
-  } catch {
-    return memoryStore;
-  }
-}
-
-function saveGoals(goals: LearningGoal[]): void {
-  memoryStore = goals;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(goals));
-  } catch {
-    // Storage unavailable: memory-only is acceptable for the mock phase.
-  }
-}
 
 function fail(status: number, code: string): never {
   throw new ApiError(code, status, code);
@@ -442,8 +415,12 @@ function outcomeExample(targetLevel: TargetLevel, label: string, weeks: number):
 /* Public engine API (consumed only by goal-discovery.service.ts)      */
 /* ------------------------------------------------------------------ */
 
-function ownGoal(goals: LearningGoal[], goalId: string, studentId: string): LearningGoal {
-  const goal = goals.find((g) => g.id === goalId);
+async function ownGoal(
+  store: GoalStore,
+  goalId: string,
+  studentId: string,
+): Promise<LearningGoal> {
+  const goal = await store.findById(goalId);
   if (!goal) fail(404, "goal_not_found");
   if (goal.studentId !== studentId) fail(403, "forbidden");
   return goal;
@@ -454,16 +431,29 @@ function postValidationStatus(validation: GoalValidationResult): LearningGoal["s
   return validation.valid ? "validated" : "refining";
 }
 
-export const mockGoalEngine = {
-  createGoal(
-    input: GoalDiscoveryInput,
-    ctx: { studentId: string; idempotencyKey: string },
-  ): GoalWithValidation {
-    const goals = loadGoals();
+export interface GoalEngineDeps {
+  goals: GoalStore;
+}
 
+/** Input the APPLICATION layer resolves — never supplied by a client. */
+export interface GoalCreationContext {
+  studentId: string;
+  idempotencyKey: string;
+  /** Latest completed diagnosis for this student, or null. */
+  diagnosisContext: LearningGoal["diagnosisContext"];
+}
+
+export function createGoalEngine(deps: GoalEngineDeps) {
+  const store = deps.goals;
+
+  return {
+  async createGoal(
+    input: GoalDiscoveryInput,
+    ctx: GoalCreationContext,
+  ): Promise<GoalWithValidation> {
     // Idempotent creation: a replayed request returns the original goal.
-    const existing = goals.find(
-      (g) => g.studentId === ctx.studentId && g.createIdempotencyKey === ctx.idempotencyKey,
+    const existing = (await store.listByStudent(ctx.studentId)).find(
+      (g) => g.createIdempotencyKey === ctx.idempotencyKey,
     );
     if (existing && existing.validation) {
       return { goal: cloneGoal(existing), validation: existing.validation };
@@ -486,8 +476,9 @@ export const mockGoalEngine = {
         input.successCriteria && input.successCriteria.length > 0
           ? input.successCriteria
           : draftCriteria(input.targetLevel, domainLabel(input.targetDomain)),
-      // Diagnosis is resolved engine-side — the client never supplies it.
-      diagnosisContext: mockAssessmentEngine.getLatestCompletedResult(),
+      // Diagnosis is resolved by the application layer from the owner's
+      // own assessment history — the client never supplies it.
+      diagnosisContext: ctx.diagnosisContext,
       validation: null,
       createdAt: now,
       updatedAt: now,
@@ -504,36 +495,35 @@ export const mockGoalEngine = {
     assertTransition(goal.status, postValidationStatus(validation));
     goal.status = postValidationStatus(validation);
 
-    goals.push(goal);
-    saveGoals(goals);
+    await store.upsert(goal);
     return { goal: cloneGoal(goal), validation };
   },
 
-  getActiveGoal(studentId: string): LearningGoal | null {
-    const goals = loadGoals();
+  async getActiveGoal(studentId: string): Promise<LearningGoal | null> {
     // Latest created goal wins; on identical timestamps (same millisecond)
     // the later-inserted goal takes precedence.
     let active: LearningGoal | undefined;
-    for (const goal of goals) {
-      if (goal.studentId !== studentId) continue;
+    for (const goal of await store.listByStudent(studentId)) {
       if (["abandoned", "revised", "achieved"].includes(goal.status)) continue;
       if (!active || goal.createdAt >= active.createdAt) active = goal;
     }
     return active ? cloneGoal(active) : null;
   },
 
-  getGoal(goalId: string, studentId: string): LearningGoal {
-    const goals = loadGoals();
-    return cloneGoal(ownGoal(goals, goalId, studentId));
+  async getGoal(goalId: string, studentId: string): Promise<LearningGoal> {
+    return cloneGoal(await ownGoal(store, goalId, studentId));
   },
 
   /**
    * Student-driven refinement. The patch comes from the student's form —
    * the engine never rewrites student input on its own (§11).
    */
-  updateGoal(goalId: string, studentId: string, patch: GoalRefinePatch): GoalWithValidation {
-    const goals = loadGoals();
-    const goal = ownGoal(goals, goalId, studentId);
+  async updateGoal(
+    goalId: string,
+    studentId: string,
+    patch: GoalRefinePatch,
+  ): Promise<GoalWithValidation> {
+    const goal = await ownGoal(store, goalId, studentId);
     if (!isEditable(goal.status)) fail(409, "invalid_transition");
 
     applyPatch(goal, patch);
@@ -548,17 +538,16 @@ export const mockGoalEngine = {
       goal.status = next;
     }
 
-    saveGoals(goals);
+    await store.upsert(goal);
     return { goal: cloneGoal(goal), validation };
   },
 
   /** Pure re-validation; persists the fresh result on the goal. */
-  validateGoal(goalId: string, studentId: string): GoalValidationResult {
-    const goals = loadGoals();
-    const goal = ownGoal(goals, goalId, studentId);
+  async validateGoal(goalId: string, studentId: string): Promise<GoalValidationResult> {
+    const goal = await ownGoal(store, goalId, studentId);
     const validation = evaluate(goal);
     goal.validation = validation;
-    saveGoals(goals);
+    await store.upsert(goal);
     return validation;
   },
 
@@ -567,9 +556,12 @@ export const mockGoalEngine = {
    * Idempotent: repeated locks never duplicate the transition, and a
    * failed persistence leaves the goal unlocked (§13/§14).
    */
-  lockGoal(goalId: string, studentId: string, idempotencyKey: string): LearningGoal {
-    const goals = loadGoals();
-    const goal = ownGoal(goals, goalId, studentId);
+  async lockGoal(
+    goalId: string,
+    studentId: string,
+    idempotencyKey: string,
+  ): Promise<LearningGoal> {
+    const goal = await ownGoal(store, goalId, studentId);
 
     if (goal.status === "locked") {
       // Already locked — consistent final state, no duplicate transition.
@@ -579,7 +571,7 @@ export const mockGoalEngine = {
     const validation = evaluate(goal);
     goal.validation = validation;
     if (!validation.valid) {
-      saveGoals(goals);
+      await store.upsert(goal);
       fail(422, "validation_failed");
     }
 
@@ -596,10 +588,7 @@ export const mockGoalEngine = {
     // Persist BEFORE reporting success: the locked state only exists once
     // the store is updated, so a failed save never yields a "fake" lock.
     // (Transport-level failures are simulated/tested at the service seam.)
-    const index = goals.findIndex((g) => g.id === goalId);
-    const nextGoals = [...goals];
-    nextGoals[index] = locked;
-    saveGoals(nextGoals);
+    await store.upsert(locked);
     return cloneGoal(locked);
   },
 
@@ -608,9 +597,8 @@ export const mockGoalEngine = {
    * `revised` and a fresh editable copy is created. A locked goal can
    * never silently slide back to draft.
    */
-  reviseGoal(goalId: string, studentId: string): GoalWithValidation {
-    const goals = loadGoals();
-    const goal = ownGoal(goals, goalId, studentId);
+  async reviseGoal(goalId: string, studentId: string): Promise<GoalWithValidation> {
+    const goal = await ownGoal(store, goalId, studentId);
     if (goal.status !== "locked" && goal.status !== "active") fail(409, "invalid_transition");
 
     assertTransition(goal.status, "revised");
@@ -638,21 +626,25 @@ export const mockGoalEngine = {
     assertTransition(revision.status, postValidationStatus(validation));
     revision.status = postValidationStatus(validation);
 
-    goals.push(revision);
-    saveGoals(goals);
+    // Two aggregates that must agree: a goal marked `revised` with no
+    // successor would leave the student with no editable goal at all. Either
+    // both land or neither does (§13). The in-memory adapter runs this
+    // straight through; PostgreSQL commits it as one transaction.
+    await store.transaction(async () => {
+      await store.upsert(goal);
+      await store.upsert(revision);
+    });
     return { goal: cloneGoal(revision), validation };
   },
 
-  /** Test helper: clears persisted mock state. */
-  __reset(): void {
-    memoryStore = [];
-    try {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // Ignore unavailable storage in non-browser contexts.
-    }
+  /** Test seam: clears this engine's persisted goals. */
+  async __reset(): Promise<void> {
+    await store.clear();
   },
-};
+  };
+}
+
+export type GoalEngine = ReturnType<typeof createGoalEngine>;
 
 /* ------------------------------------------------------------------ */
 
