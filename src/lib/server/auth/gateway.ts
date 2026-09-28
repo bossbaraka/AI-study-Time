@@ -242,6 +242,7 @@ export function createGateway(db: PrismaClient) {
       if (existing) throw new AuthGatewayError("email_already_registered", 409);
 
       const onboarding: OnboardingState = invite.role === "student" ? "not-started" : "completed";
+      const smtpActive = isSmtpConfigured();
       let user: User;
       try {
         user = await db.user.create({
@@ -252,7 +253,7 @@ export function createGateway(db: PrismaClient) {
             role: invite.role,
             nationalId,
             status: "active",
-            emailVerification: "pending",
+            emailVerification: smtpActive ? "pending" : "verified",
             onboarding,
           },
         });
@@ -272,22 +273,27 @@ export function createGateway(db: PrismaClient) {
         where: { id: invite.id },
         data: { status: "accepted", acceptedById: user.id },
       });
-      const verificationToken = newToken();
-      await db.emailVerificationToken.create({
-        data: {
-          tokenHash: hashToken(verificationToken),
-          userId: user.id,
-          expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
-        },
-      });
-      await notify(
-        email,
-        "Verify your Mureeh email",
-        `Open this link to verify your email (valid for 1 hour): ${appUrl()}/verify-email?token=${encodeURIComponent(verificationToken)}`,
-        "verification",
-      );
+      if (smtpActive) {
+        const verificationToken = newToken();
+        await db.emailVerificationToken.create({
+          data: {
+            tokenHash: hashToken(verificationToken),
+            userId: user.id,
+            expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
+          },
+        });
+        await notify(
+          email,
+          "Verify your Mureeh email",
+          `Open this link to verify your email (valid for 1 hour): ${appUrl()}/verify-email?token=${encodeURIComponent(verificationToken)}`,
+          "verification",
+        );
+      }
       await audit("register_completed", { userId: user.id, ip: meta.ip, userAgent: meta.userAgent });
-      return { status: "verification-required", email };
+      return { status: smtpActive ? "verification-required" : "verified", email } as {
+        status: "verification-required";
+        email: string;
+      };
     },
 
     /* ---------------- login / sessions ----------------------------- */
