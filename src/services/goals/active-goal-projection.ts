@@ -8,12 +8,14 @@
  * it into the legacy `Goal` shape; otherwise the seeded mock remains as
  * a graceful fallback. Nothing is destructively rewritten.
  *
- * In the real-backend phase this projection moves server-side; the
- * dashboard contract (`Goal`) does not change.
+ * The goal itself is read through the goal service, so this projection
+ * follows whatever transport that service uses — real HTTP in the
+ * application, the in-process engine under test. The dashboard contract
+ * (`Goal`) does not change either way.
  */
 
 import { authService } from "@/services/auth.service";
-import { mockGoalEngine } from "@/services/engines";
+import { goalDiscoveryService } from "@/services/goal-discovery.service";
 import type { Goal } from "@/types/domain";
 import type { LearningGoal } from "@/types/goal";
 
@@ -46,7 +48,11 @@ export async function getAuthoritativeDashboardGoal(): Promise<Goal | null> {
   const state = await authService.getSessionState();
   if (state.status !== "authenticated" || !state.session) return null;
   if (state.session.user.role !== "student") return null;
-  const active = await mockGoalEngine.getActiveGoal(state.session.user.id);
+  // Through the goal service, not the in-process engine: in the running
+  // application that is an HTTP call to /api/goals/active, so the dashboard
+  // projects the SAME goal the database holds. Reading the browser engine
+  // here would project whatever happens to be in localStorage.
+  const active = await goalDiscoveryService.getActiveGoal();
   if (!active || active.status !== "locked") return null;
   return projectLockedGoal(active);
 }

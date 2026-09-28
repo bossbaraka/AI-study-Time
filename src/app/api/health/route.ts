@@ -1,16 +1,17 @@
 import { NextResponse } from "next/server";
 
 /**
- * API seam placeholder.
- * When the REST/Supabase backend lands, feature routes are added here
- * (e.g. /api/me, /api/goal, /api/roadmap) and `USE_MOCK` in
- * src/lib/api/client.ts is flipped to false. Service signatures do not change.
+ * GET /api/health — liveness.
+ *
+ * Reports the process, not the database: a health check that opens a
+ * connection turns a database outage into a load-balancer eviction of healthy
+ * app servers. Persistence has its own failure path (§28), which answers 503
+ * on the request that actually needed it.
  */
 export function GET() {
   return NextResponse.json({
     status: "ok",
     service: "mureeh-frontend",
-    mode: "mock",
     time: new Date().toISOString(),
   });
 }

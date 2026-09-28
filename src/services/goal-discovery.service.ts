@@ -9,7 +9,7 @@
  * request cannot read or lock another student's goal.
  */
 
-import { ApiError, USE_MOCK, httpRequest, mockRequest } from "@/lib/api/client";
+import { ApiError, GOALS_USE_API, httpRequest, mockRequest } from "@/lib/api/client";
 import { assessmentResultSource, mockGoalEngine } from "@/services/engines";
 import { requireStudentId } from "@/services/session-guard";
 import { isGoalErrorCode } from "@/types/goal";
@@ -62,23 +62,23 @@ function viaMock<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 export const goalDiscoveryService = {
   /** The student's current goal (any live status incl. locked), or null. */
   getActiveGoal(signal?: AbortSignal): Promise<LearningGoal | null> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return GOALS_USE_API
+      ? viaHttp(() =>
+          httpRequest<LearningGoal | null>("/api/goals/active", { signal }),
+        )
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockGoalEngine.getActiveGoal(studentId);
-        })
-      : viaHttp(() =>
-          httpRequest<LearningGoal | null>("/api/goals/active", { signal }),
-        );
+        });
   },
 
   getGoal(goalId: string, signal?: AbortSignal): Promise<LearningGoal> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return GOALS_USE_API
+      ? viaHttp(() => httpRequest<LearningGoal>(`/api/goals/${goalId}`, { signal }))
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockGoalEngine.getGoal(goalId, studentId);
-        })
-      : viaHttp(() => httpRequest<LearningGoal>(`/api/goals/${goalId}`, { signal }));
+        });
   },
 
   /**
@@ -91,8 +91,15 @@ export const goalDiscoveryService = {
     idempotencyKey: string,
     signal?: AbortSignal,
   ): Promise<GoalWithValidation> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return GOALS_USE_API
+      ? viaHttp(() =>
+          httpRequest<GoalWithValidation>("/api/goals", {
+            method: "POST",
+            body: { input, idempotencyKey },
+            signal,
+          }),
+        )
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           // Resolved here (application layer) through the assessment port —
           // the client never supplies diagnosis context, and the goal
@@ -104,14 +111,7 @@ export const goalDiscoveryService = {
             idempotencyKey,
             diagnosisContext,
           });
-        })
-      : viaHttp(() =>
-          httpRequest<GoalWithValidation>("/api/goals", {
-            method: "POST",
-            body: { input, idempotencyKey },
-            signal,
-          }),
-        );
+        });
   },
 
   /** Student-driven refinement; re-validates and returns the new verdict. */
@@ -120,59 +120,59 @@ export const goalDiscoveryService = {
     patch: GoalRefinePatch,
     signal?: AbortSignal,
   ): Promise<GoalWithValidation> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockGoalEngine.updateGoal(goalId, studentId, patch);
-        })
-      : viaHttp(() =>
+    return GOALS_USE_API
+      ? viaHttp(() =>
           httpRequest<GoalWithValidation>(`/api/goals/${goalId}`, {
             method: "PATCH",
             body: patch,
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockGoalEngine.updateGoal(goalId, studentId, patch);
+        });
   },
 
   validateGoal(goalId: string, signal?: AbortSignal): Promise<GoalValidationResult> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return GOALS_USE_API
+      ? viaHttp(() =>
+          httpRequest<GoalValidationResult>(`/api/goals/${goalId}/validation`, { signal }),
+        )
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockGoalEngine.validateGoal(goalId, studentId);
-        })
-      : viaHttp(() =>
-          httpRequest<GoalValidationResult>(`/api/goals/${goalId}/validation`, { signal }),
-        );
+        });
   },
 
   /** Idempotent lock: replays never duplicate the transition (§14). */
   lockGoal(goalId: string, idempotencyKey: string, signal?: AbortSignal): Promise<LearningGoal> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockGoalEngine.lockGoal(goalId, studentId, idempotencyKey);
-        })
-      : viaHttp(() =>
+    return GOALS_USE_API
+      ? viaHttp(() =>
           httpRequest<LearningGoal>(`/api/goals/${goalId}/lock`, {
             method: "POST",
             body: { idempotencyKey },
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockGoalEngine.lockGoal(goalId, studentId, idempotencyKey);
+        });
   },
 
   /** Explicit revision of a locked goal — the only way to edit one (§5). */
   reviseGoal(goalId: string, signal?: AbortSignal): Promise<GoalWithValidation> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockGoalEngine.reviseGoal(goalId, studentId);
-        })
-      : viaHttp(() =>
+    return GOALS_USE_API
+      ? viaHttp(() =>
           httpRequest<GoalWithValidation>(`/api/goals/${goalId}/revise`, {
             method: "POST",
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockGoalEngine.reviseGoal(goalId, studentId);
+        });
   },
 };

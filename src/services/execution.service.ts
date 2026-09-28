@@ -10,7 +10,7 @@
  * and unknown/foreign ids collapse to 404 so existence is never leaked.
  */
 
-import { ApiError, USE_MOCK, httpRequest, mockRequest } from "@/lib/api/client";
+import { ApiError, EXECUTIONS_USE_API, httpRequest, mockRequest } from "@/lib/api/client";
 import {
   EvidenceInvalidError,
   ExecutionConflictError,
@@ -91,26 +91,26 @@ export const executionService = {
    * no roadmap exists yet (the roadmap flow owns that case).
    */
   getExecutionView(signal?: AbortSignal): Promise<RoadmapExecutionView | null> {
-    return USE_MOCK
-      ? viaMock(async () => {
+    return EXECUTIONS_USE_API
+      ? viaHttp(() => httpRequest<RoadmapExecutionView | null>("/api/executions/view", { signal }))
+      : viaMock(async () => {
           const studentId = await requireStudentId();
           return mockExecutionEngine.getExecutionView(studentId);
-        }, signal)
-      : viaHttp(() => httpRequest<RoadmapExecutionView | null>("/api/executions/view", { signal }));
+        }, signal);
   },
 
   /** Everything the learn screen needs for one unit, resolved server-side. */
   getUnitContext(learningUnitId: string, signal?: AbortSignal): Promise<UnitLearningContext> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockExecutionEngine.getUnitContext(learningUnitId, studentId);
-        }, signal)
-      : viaHttp(() =>
+    return EXECUTIONS_USE_API
+      ? viaHttp(() =>
           httpRequest<UnitLearningContext>(`/api/executions/units/${learningUnitId}/context`, {
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockExecutionEngine.getUnitContext(learningUnitId, studentId);
+        }, signal);
   },
 
   /**
@@ -121,17 +121,17 @@ export const executionService = {
     learningUnitId: string,
     signal?: AbortSignal,
   ): Promise<LearningUnitExecution> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockExecutionEngine.startLearningUnit(learningUnitId, studentId);
-        }, signal)
-      : viaHttp(() =>
+    return EXECUTIONS_USE_API
+      ? viaHttp(() =>
           httpRequest<LearningUnitExecution>(`/api/executions/units/${learningUnitId}/start`, {
             method: "POST",
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockExecutionEngine.startLearningUnit(learningUnitId, studentId);
+        }, signal);
   },
 
   /** Submits the student's text evidence (solution + reasoning). */
@@ -140,18 +140,18 @@ export const executionService = {
     input: EvidenceInput,
     signal?: AbortSignal,
   ): Promise<LearningUnitExecution> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockExecutionEngine.submitEvidence(learningUnitId, input, studentId);
-        }, signal)
-      : viaHttp(() =>
+    return EXECUTIONS_USE_API
+      ? viaHttp(() =>
           httpRequest<LearningUnitExecution>(`/api/executions/units/${learningUnitId}/evidence`, {
             method: "POST",
             body: input,
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockExecutionEngine.submitEvidence(learningUnitId, input, studentId);
+        }, signal);
   },
 
   /** Runs the deterministic development evaluation (§9 — no fake AI). */
@@ -159,16 +159,16 @@ export const executionService = {
     learningUnitId: string,
     signal?: AbortSignal,
   ): Promise<LearningUnitExecution> {
-    return USE_MOCK
-      ? viaMock(async () => {
-          const studentId = await requireStudentId();
-          return mockExecutionEngine.evaluateExecution(learningUnitId, studentId);
-        }, signal)
-      : viaHttp(() =>
+    return EXECUTIONS_USE_API
+      ? viaHttp(() =>
           httpRequest<LearningUnitExecution>(`/api/executions/units/${learningUnitId}/evaluate`, {
             method: "POST",
             signal,
           }),
-        );
+        )
+      : viaMock(async () => {
+          const studentId = await requireStudentId();
+          return mockExecutionEngine.evaluateExecution(learningUnitId, studentId);
+        }, signal);
   },
 };

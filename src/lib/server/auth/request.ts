@@ -7,9 +7,9 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/server/db";
-import { ApiError } from "@/lib/api/client";
 import { PersistenceConflictError } from "@/services/ports/stores";
 import { dbErrorCategory, isDatabaseUnavailable } from "@/services/infrastructure/prisma/context";
+import { mapDomainError } from "@/lib/server/domain-errors";
 import { AuthGatewayError, createGateway, SESSION_TTL_SEC } from "@/lib/server/auth/gateway";
 import type { AuthUser } from "@/types/auth";
 
@@ -103,12 +103,13 @@ export async function errorResponse(
     logFailure(error, context, 503);
     return NextResponse.json({ code: "service_unavailable" }, { status: 503 });
   }
-  // Domain engines throw `ApiError` carrying a stable, non-sensitive code
-  // and the HTTP status it maps to. The message is never forwarded — only
-  // the code crosses the boundary.
-  if (error instanceof ApiError) {
-    const status = error.status >= 400 && error.status <= 599 ? error.status : 500;
-    return NextResponse.json({ code: error.code ?? "unknown" }, { status });
+  // Domain errors that already carry their own classification keep it
+  // (§12). Only the code crosses the boundary, never a message: the client
+  // maps codes to translation keys, and a message could carry internals.
+  const mapped = mapDomainError(error);
+  if (mapped) {
+    if (mapped.status >= 500) logFailure(error, context, mapped.status);
+    return NextResponse.json({ code: mapped.code }, { status: mapped.status });
   }
   // Anything else is an internal failure: log server-side, never forward.
   logFailure(error, context, 500);

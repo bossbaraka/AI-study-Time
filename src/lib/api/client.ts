@@ -1,14 +1,25 @@
 /**
  * API client — the single seam between the frontend and any backend.
  *
- * Today it resolves against the typed mock layer. Swapping in the real
- * REST/Supabase backend means changing `USE_MOCK` and implementing
- * `httpRequest`; no component, hook or service signature changes.
+ * Every domain that has real endpoints resolves through `httpRequest` in the
+ * running application, and through the in-process engine under Vitest so
+ * component tests stay hermetic. One switch per domain, and no component,
+ * hook or service signature changes when it flips.
  */
 
 import { appConfig } from "@/config/site";
 
-export const USE_MOCK = true;
+/**
+ * Under Vitest the browser-side services run against the in-process engines;
+ * everywhere else they call the real HTTP routes. The route handlers
+ * themselves are exercised separately, against PostgreSQL, by the API
+ * integration suites.
+ */
+const REAL_TRANSPORT = !process.env.VITEST;
+
+export const GOALS_USE_API = REAL_TRANSPORT;
+export const ROADMAPS_USE_API = REAL_TRANSPORT;
+export const EXECUTIONS_USE_API = REAL_TRANSPORT;
 
 /**
  * AUTH GATEWAY MODE.
@@ -55,7 +66,7 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
-/** Real HTTP transport, used once `USE_MOCK` is false. */
+/** Real HTTP transport. */
 export async function httpRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   let response: Response;
   try {
