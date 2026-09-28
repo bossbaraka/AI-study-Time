@@ -9,6 +9,7 @@
 
 import { randomBytes, scryptSync } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
 
@@ -21,7 +22,10 @@ function hashPassword(password) {
   return `s2$${SCRYPT.N}$${salt.toString("hex")}$${Buffer.from(dk).toString("base64url")}`;
 }
 
-const db = new PrismaClient();
+const connectionString = process.env.DATABASE_URL;
+const db = new PrismaClient({
+  adapter: new PrismaPg({ connectionString }),
+});
 
 async function upsertUser({ id, email, name, role, nationalId, password, onboarding }) {
   const passwordHash = hashPassword(password);
