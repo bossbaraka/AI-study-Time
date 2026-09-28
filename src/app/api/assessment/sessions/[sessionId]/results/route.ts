@@ -13,6 +13,6 @@ interface Ctx {
 export async function GET(req: Request, { params }: Ctx): Promise<NextResponse> {
   const { sessionId } = await params;
   return withStudent(req, async (student) =>
-    NextResponse.json(mockAssessmentEngine.getResults(sessionId, student.id)),
+    NextResponse.json(await mockAssessmentEngine.getResults(sessionId, student.id)),
   );
 }

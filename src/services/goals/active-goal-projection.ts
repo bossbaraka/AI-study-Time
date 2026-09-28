@@ -46,7 +46,7 @@ export async function getAuthoritativeDashboardGoal(): Promise<Goal | null> {
   const state = await authService.getSessionState();
   if (state.status !== "authenticated" || !state.session) return null;
   if (state.session.user.role !== "student") return null;
-  const active = mockGoalEngine.getActiveGoal(state.session.user.id);
+  const active = await mockGoalEngine.getActiveGoal(state.session.user.id);
   if (!active || active.status !== "locked") return null;
   return projectLockedGoal(active);
 }

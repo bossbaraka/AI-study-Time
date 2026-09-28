@@ -57,32 +57,35 @@ export function createStores(kind: StoreBackend): DomainStores {
   const executions = backend<LearningUnitExecution>(kind, EXECUTIONS_KEY);
 
   return {
+    // The collection backends are synchronous; the ports are async because
+    // the Prisma adapters are. Wrapping here keeps that difference inside
+    // the infrastructure layer.
     assessmentSessions: {
-      listByStudent: (studentId) =>
+      listByStudent: async (studentId) =>
         sessions.list().filter((session) => session.studentId === studentId),
-      findById: (id) => sessions.findById(id),
-      upsert: (session) => sessions.upsert(session),
-      clear: () => sessions.clear(),
+      findById: async (id) => sessions.findById(id),
+      upsert: async (session) => sessions.upsert(session),
+      clear: async () => sessions.clear(),
     },
     goals: {
-      listByStudent: (studentId) => goals.list().filter((goal) => goal.studentId === studentId),
-      findById: (id) => goals.findById(id),
-      upsert: (goal) => goals.upsert(goal),
-      clear: () => goals.clear(),
+      listByStudent: async (studentId) => goals.list().filter((goal) => goal.studentId === studentId),
+      findById: async (id) => goals.findById(id),
+      upsert: async (goal) => goals.upsert(goal),
+      clear: async () => goals.clear(),
     },
     roadmaps: {
-      listByStudent: (studentId) =>
+      listByStudent: async (studentId) =>
         roadmaps.list().filter((roadmap) => roadmap.studentId === studentId),
-      findById: (id) => roadmaps.findById(id),
-      upsert: (roadmap) => roadmaps.upsert(roadmap),
-      clear: () => roadmaps.clear(),
+      findById: async (id) => roadmaps.findById(id),
+      upsert: async (roadmap) => roadmaps.upsert(roadmap),
+      clear: async () => roadmaps.clear(),
     },
     executions: {
-      listByRoadmap: (roadmapId) =>
+      listByRoadmap: async (roadmapId) =>
         executions.list().filter((execution) => execution.roadmapId === roadmapId),
-      list: () => executions.list(),
-      upsert: (execution) => executions.upsert(execution),
-      clear: () => executions.clear(),
+      list: async () => executions.list(),
+      upsert: async (execution) => executions.upsert(execution),
+      clear: async () => executions.clear(),
     },
     resetAll: () => {
       sessions.clear();

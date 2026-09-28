@@ -95,13 +95,13 @@ async function seedGoal(
   input: GoalDiscoveryInput = strongInput(),
   opts: { lock?: boolean } = {},
 ) {
-  const created = mockGoalEngine.createGoal(input, {
+  const created = await mockGoalEngine.createGoal(input, {
     studentId,
     idempotencyKey: `seed-${Math.random()}`,
     diagnosisContext: null,
   });
   if (opts.lock) {
-    mockGoalEngine.lockGoal(created.goal.id, studentId, `seed-lock-${Math.random()}`);
+    await mockGoalEngine.lockGoal(created.goal.id, studentId, `seed-lock-${Math.random()}`);
   }
   return created.goal;
 }
@@ -136,15 +136,15 @@ async function fillForm(
 
 beforeEach(async () => {
   window.localStorage.removeItem("mureeh.locale");
-  mockGoalEngine.__reset();
-  mockAssessmentEngine.__reset();
+  await mockGoalEngine.__reset();
+  await mockAssessmentEngine.__reset();
   const { session } = await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
   studentId = session.user.id;
 });
 
 describe("goal flow — intro (§6)", () => {
   it("acknowledges the diagnosis before asking for anything", async () => {
-    vi.spyOn(mockAssessmentEngine, "getLatestCompletedResult").mockReturnValue(FAKE_DIAGNOSIS);
+    vi.spyOn(mockAssessmentEngine, "getLatestCompletedResult").mockResolvedValue(FAKE_DIAGNOSIS);
     renderFlow();
     await expectIntro();
     expect(
@@ -165,7 +165,7 @@ describe("goal flow — intro (§6)", () => {
   });
 
   it("prefills only the current level from the diagnosis — student decides", async () => {
-    vi.spyOn(mockAssessmentEngine, "getLatestCompletedResult").mockReturnValue(FAKE_DIAGNOSIS);
+    vi.spyOn(mockAssessmentEngine, "getLatestCompletedResult").mockResolvedValue(FAKE_DIAGNOSIS);
     const user = userEvent.setup();
     renderFlow();
     await expectIntro();
@@ -253,7 +253,7 @@ describe("goal flow — discovery → validation → review → lock (§9–§14
 
     expect(await screen.findByRole("heading", { name: /Your goal is locked/i })).toBeDefined();
     expect(screen.getByText(/Locked on/i)).toBeDefined();
-    const active = mockGoalEngine.getActiveGoal(studentId);
+    const active = await mockGoalEngine.getActiveGoal(studentId);
     expect(active?.status).toBe("locked");
   });
 
@@ -291,7 +291,7 @@ describe("goal flow — error recovery (§13/§14/§20)", () => {
     expect(await screen.findByRole("alert")).toBeDefined();
     expect(screen.getByText(/couldn't save your goal/i)).toBeDefined();
     expect(screen.getByRole("heading", { name: /Your goal, in one view/i })).toBeDefined();
-    expect(mockGoalEngine.getGoal(goal.id, studentId).status).toBe("validated");
+    expect((await mockGoalEngine.getGoal(goal.id, studentId)).status).toBe("validated");
 
     // Retry with the same idempotency key succeeds.
     await user.click(screen.getByRole("button", { name: /Try again/i }));
@@ -308,7 +308,7 @@ describe("goal flow — persistence, revision and navigation (§5/§14/§15)", (
     renderFlow();
     expect(await screen.findByRole("heading", { name: /Your goal is locked/i })).toBeDefined();
     expect(screen.getByText(STRONG_OUTCOME)).toBeDefined();
-    expect(mockGoalEngine.getGoal(goal.id, studentId).status).toBe("locked");
+    expect((await mockGoalEngine.getGoal(goal.id, studentId)).status).toBe("locked");
   });
 
   it("offers explicit revision of a locked goal — never a silent unlock", async () => {
@@ -321,8 +321,8 @@ describe("goal flow — persistence, revision and navigation (§5/§14/§15)", (
 
     // The revision is a fresh editable goal; the original stays `revised`.
     expect(await screen.findByRole("heading", { name: /Your goal, in one view/i })).toBeDefined();
-    expect(mockGoalEngine.getGoal(goal.id, studentId).status).toBe("revised");
-    const active = mockGoalEngine.getActiveGoal(studentId);
+    expect((await mockGoalEngine.getGoal(goal.id, studentId)).status).toBe("revised");
+    const active = await mockGoalEngine.getActiveGoal(studentId);
     expect(active?.id).not.toBe(goal.id);
     expect(active?.status).not.toBe("locked");
   });

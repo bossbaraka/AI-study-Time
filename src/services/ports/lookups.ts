@@ -26,12 +26,12 @@ import type { Roadmap } from "@/types/roadmap";
  * intentionally indistinguishable.
  */
 export interface GoalLookup {
-  getGoal(goalId: string, studentId: string): LearningGoal;
+  getGoal(goalId: string, studentId: string): Promise<LearningGoal>;
 }
 
 /** Read side of the roadmap domain, consumed by the execution engine. */
 export interface RoadmapLookup {
-  getActiveRoadmap(studentId: string): Roadmap | null;
+  getActiveRoadmap(studentId: string): Promise<Roadmap | null>;
 }
 
 /**

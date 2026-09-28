@@ -415,8 +415,12 @@ function outcomeExample(targetLevel: TargetLevel, label: string, weeks: number):
 /* Public engine API (consumed only by goal-discovery.service.ts)      */
 /* ------------------------------------------------------------------ */
 
-function ownGoal(store: GoalStore, goalId: string, studentId: string): LearningGoal {
-  const goal = store.findById(goalId);
+async function ownGoal(
+  store: GoalStore,
+  goalId: string,
+  studentId: string,
+): Promise<LearningGoal> {
+  const goal = await store.findById(goalId);
   if (!goal) fail(404, "goal_not_found");
   if (goal.studentId !== studentId) fail(403, "forbidden");
   return goal;
@@ -443,14 +447,14 @@ export function createGoalEngine(deps: GoalEngineDeps) {
   const store = deps.goals;
 
   return {
-  createGoal(
+  async createGoal(
     input: GoalDiscoveryInput,
     ctx: GoalCreationContext,
-  ): GoalWithValidation {
+  ): Promise<GoalWithValidation> {
     // Idempotent creation: a replayed request returns the original goal.
-    const existing = store
-      .listByStudent(ctx.studentId)
-      .find((g) => g.createIdempotencyKey === ctx.idempotencyKey);
+    const existing = (await store.listByStudent(ctx.studentId)).find(
+      (g) => g.createIdempotencyKey === ctx.idempotencyKey,
+    );
     if (existing && existing.validation) {
       return { goal: cloneGoal(existing), validation: existing.validation };
     }
@@ -491,31 +495,35 @@ export function createGoalEngine(deps: GoalEngineDeps) {
     assertTransition(goal.status, postValidationStatus(validation));
     goal.status = postValidationStatus(validation);
 
-    store.upsert(goal);
+    await store.upsert(goal);
     return { goal: cloneGoal(goal), validation };
   },
 
-  getActiveGoal(studentId: string): LearningGoal | null {
+  async getActiveGoal(studentId: string): Promise<LearningGoal | null> {
     // Latest created goal wins; on identical timestamps (same millisecond)
     // the later-inserted goal takes precedence.
     let active: LearningGoal | undefined;
-    for (const goal of store.listByStudent(studentId)) {
+    for (const goal of await store.listByStudent(studentId)) {
       if (["abandoned", "revised", "achieved"].includes(goal.status)) continue;
       if (!active || goal.createdAt >= active.createdAt) active = goal;
     }
     return active ? cloneGoal(active) : null;
   },
 
-  getGoal(goalId: string, studentId: string): LearningGoal {
-    return cloneGoal(ownGoal(store, goalId, studentId));
+  async getGoal(goalId: string, studentId: string): Promise<LearningGoal> {
+    return cloneGoal(await ownGoal(store, goalId, studentId));
   },
 
   /**
    * Student-driven refinement. The patch comes from the student's form —
    * the engine never rewrites student input on its own (§11).
    */
-  updateGoal(goalId: string, studentId: string, patch: GoalRefinePatch): GoalWithValidation {
-    const goal = ownGoal(store, goalId, studentId);
+  async updateGoal(
+    goalId: string,
+    studentId: string,
+    patch: GoalRefinePatch,
+  ): Promise<GoalWithValidation> {
+    const goal = await ownGoal(store, goalId, studentId);
     if (!isEditable(goal.status)) fail(409, "invalid_transition");
 
     applyPatch(goal, patch);
@@ -530,16 +538,16 @@ export function createGoalEngine(deps: GoalEngineDeps) {
       goal.status = next;
     }
 
-    store.upsert(goal);
+    await store.upsert(goal);
     return { goal: cloneGoal(goal), validation };
   },
 
   /** Pure re-validation; persists the fresh result on the goal. */
-  validateGoal(goalId: string, studentId: string): GoalValidationResult {
-    const goal = ownGoal(store, goalId, studentId);
+  async validateGoal(goalId: string, studentId: string): Promise<GoalValidationResult> {
+    const goal = await ownGoal(store, goalId, studentId);
     const validation = evaluate(goal);
     goal.validation = validation;
-    store.upsert(goal);
+    await store.upsert(goal);
     return validation;
   },
 
@@ -548,8 +556,12 @@ export function createGoalEngine(deps: GoalEngineDeps) {
    * Idempotent: repeated locks never duplicate the transition, and a
    * failed persistence leaves the goal unlocked (§13/§14).
    */
-  lockGoal(goalId: string, studentId: string, idempotencyKey: string): LearningGoal {
-    const goal = ownGoal(store, goalId, studentId);
+  async lockGoal(
+    goalId: string,
+    studentId: string,
+    idempotencyKey: string,
+  ): Promise<LearningGoal> {
+    const goal = await ownGoal(store, goalId, studentId);
 
     if (goal.status === "locked") {
       // Already locked — consistent final state, no duplicate transition.
@@ -559,7 +571,7 @@ export function createGoalEngine(deps: GoalEngineDeps) {
     const validation = evaluate(goal);
     goal.validation = validation;
     if (!validation.valid) {
-      store.upsert(goal);
+      await store.upsert(goal);
       fail(422, "validation_failed");
     }
 
@@ -576,7 +588,7 @@ export function createGoalEngine(deps: GoalEngineDeps) {
     // Persist BEFORE reporting success: the locked state only exists once
     // the store is updated, so a failed save never yields a "fake" lock.
     // (Transport-level failures are simulated/tested at the service seam.)
-    store.upsert(locked);
+    await store.upsert(locked);
     return cloneGoal(locked);
   },
 
@@ -585,8 +597,8 @@ export function createGoalEngine(deps: GoalEngineDeps) {
    * `revised` and a fresh editable copy is created. A locked goal can
    * never silently slide back to draft.
    */
-  reviseGoal(goalId: string, studentId: string): GoalWithValidation {
-    const goal = ownGoal(store, goalId, studentId);
+  async reviseGoal(goalId: string, studentId: string): Promise<GoalWithValidation> {
+    const goal = await ownGoal(store, goalId, studentId);
     if (goal.status !== "locked" && goal.status !== "active") fail(409, "invalid_transition");
 
     assertTransition(goal.status, "revised");
@@ -614,14 +626,14 @@ export function createGoalEngine(deps: GoalEngineDeps) {
     assertTransition(revision.status, postValidationStatus(validation));
     revision.status = postValidationStatus(validation);
 
-    store.upsert(goal);
-    store.upsert(revision);
+    await store.upsert(goal);
+    await store.upsert(revision);
     return { goal: cloneGoal(revision), validation };
   },
 
   /** Test seam: clears this engine's persisted goals. */
-  __reset(): void {
-    store.clear();
+  async __reset(): Promise<void> {
+    await store.clear();
   },
   };
 }

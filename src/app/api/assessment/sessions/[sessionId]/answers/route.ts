@@ -25,6 +25,6 @@ export async function POST(req: Request, { params }: Ctx): Promise<NextResponse>
   if (parsed.data.sessionId !== sessionId) return invalidRequestResponse();
 
   return withStudent(req, async (student) =>
-    NextResponse.json(mockAssessmentEngine.submitAnswer(parsed.data, student.id)),
+    NextResponse.json(await mockAssessmentEngine.submitAnswer(parsed.data, student.id)),
   );
 }

@@ -8,6 +8,6 @@ export const dynamic = "force-dynamic";
 /** GET /api/assessment/sessions/active — the caller's own unfinished session. */
 export async function GET(req: Request): Promise<NextResponse> {
   return withStudent(req, async (student) =>
-    NextResponse.json(mockAssessmentEngine.getActiveSession(student.id)),
+    NextResponse.json(await mockAssessmentEngine.getActiveSession(student.id)),
   );
 }

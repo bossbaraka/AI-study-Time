@@ -35,7 +35,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     const profile = parsed.data.profile;
     const customData = profile ? await generateAssessmentQuestions(profile) : undefined;
 
-    const session = mockAssessmentEngine.createSession(student.id, profile, customData);
+    const session = await mockAssessmentEngine.createSession(student.id, profile, customData);
     return NextResponse.json(session, { status: 201 });
   });
 }

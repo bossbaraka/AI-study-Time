@@ -369,12 +369,12 @@ function newSessionId(): string {
  * Ownership gate. A foreign session is reported exactly like a missing
  * one so existence is never leaked across students.
  */
-function ownSession(
+async function ownSession(
   store: AssessmentSessionStore,
   sessionId: string,
   studentId: string,
-): Session {
-  const session = store.findById(sessionId);
+): Promise<Session> {
+  const session = await store.findById(sessionId);
   if (!session || session.studentId !== studentId) fail(404, "session_not_found");
   expireIfNeeded(session);
   return session;
@@ -384,17 +384,17 @@ export function createAssessmentEngine(deps: AssessmentEngineDeps) {
   const { sessions: store } = deps;
 
   return {
-    createSession(
+    async createSession(
       studentId: string,
       profile?: StudentAssessmentProfile,
       customData?: { bank: BankItem[]; topics: string[] },
-    ): AssessmentSession {
+    ): Promise<AssessmentSession> {
       // A brand-new session supersedes any unfinished one OF THIS STUDENT
       // (the UI warns first). Other students are never touched.
-      for (const existing of store.listByStudent(studentId)) {
+      for (const existing of await store.listByStudent(studentId)) {
         if (existing.status === "in_progress" || existing.status === "paused") {
           existing.status = "expired";
-          store.upsert(existing);
+          await store.upsert(existing);
         }
       }
       const topicsList = customData?.topics ?? ASSESSMENT_TOPICS;
@@ -410,14 +410,14 @@ export function createAssessmentEngine(deps: AssessmentEngineDeps) {
         ...(customData?.bank ? { bank: customData.bank } : {}),
         sessionTopics: topicsList,
       };
-      store.upsert(session);
+      await store.upsert(session);
       const picked = pickQuestion(session);
       return toClientSession(session, picked ? cloneQuestion(picked.item.question) : null);
     },
 
-    getActiveSession(studentId: string): AssessmentSession | null {
+    async getActiveSession(studentId: string): Promise<AssessmentSession | null> {
       let active: Session | undefined;
-      for (const session of store.listByStudent(studentId)) {
+      for (const session of await store.listByStudent(studentId)) {
         expireIfNeeded(session);
         if (session.status !== "in_progress" && session.status !== "paused") continue;
         if (!active || session.startedAt > active.startedAt) active = session;
@@ -425,14 +425,17 @@ export function createAssessmentEngine(deps: AssessmentEngineDeps) {
       return active ? toClientSession(active, currentQuestionFor(active)) : null;
     },
 
-    getSession(sessionId: string, studentId: string): AssessmentSession {
-      const session = ownSession(store, sessionId, studentId);
+    async getSession(sessionId: string, studentId: string): Promise<AssessmentSession> {
+      const session = await ownSession(store, sessionId, studentId);
       return toClientSession(session, currentQuestionFor(session));
     },
 
-    submitAnswer(payload: SubmitAnswerPayload, studentId: string): AssessmentSession {
+    async submitAnswer(
+      payload: SubmitAnswerPayload,
+      studentId: string,
+    ): Promise<AssessmentSession> {
       const { sessionId, response, submissionId } = payload;
-      const session = ownSession(store, sessionId, studentId);
+      const session = await ownSession(store, sessionId, studentId);
       if (session.status !== "in_progress") fail(409, "session_not_active");
 
       // Idempotency: an already-accepted submissionId returns current state
@@ -468,12 +471,12 @@ export function createAssessmentEngine(deps: AssessmentEngineDeps) {
       if (shouldComplete(session)) {
         session.status = "completed";
         session.completedAt = new Date().toISOString();
-        store.upsert(session);
+        await store.upsert(session);
         return toClientSession(session, null);
       }
 
       const picked = pickQuestion(session);
-      store.upsert(session);
+      await store.upsert(session);
       return toClientSession(
         session,
         picked ? cloneQuestion(picked.item.question) : null,
@@ -481,37 +484,37 @@ export function createAssessmentEngine(deps: AssessmentEngineDeps) {
       );
     },
 
-    pauseSession(sessionId: string, studentId: string): AssessmentSession {
-      const session = ownSession(store, sessionId, studentId);
+    async pauseSession(sessionId: string, studentId: string): Promise<AssessmentSession> {
+      const session = await ownSession(store, sessionId, studentId);
       if (session.status !== "in_progress") fail(409, "session_not_active");
       session.status = "paused";
-      store.upsert(session);
+      await store.upsert(session);
       return toClientSession(session, null);
     },
 
-    resumeSession(sessionId: string, studentId: string): AssessmentSession {
-      const session = ownSession(store, sessionId, studentId);
+    async resumeSession(sessionId: string, studentId: string): Promise<AssessmentSession> {
+      const session = await ownSession(store, sessionId, studentId);
       if (session.status === "completed" || session.status === "expired") {
         fail(409, "session_not_active");
       }
       session.status = "in_progress";
-      store.upsert(session);
+      await store.upsert(session);
       return toClientSession(session, currentQuestionFor(session));
     },
 
-    completeSession(sessionId: string, studentId: string): AssessmentSession {
-      const session = ownSession(store, sessionId, studentId);
+    async completeSession(sessionId: string, studentId: string): Promise<AssessmentSession> {
+      const session = await ownSession(store, sessionId, studentId);
       if (session.status !== "in_progress" && session.status !== "paused") {
         fail(409, "session_not_active");
       }
       session.status = "completed";
       session.completedAt = new Date().toISOString();
-      store.upsert(session);
+      await store.upsert(session);
       return toClientSession(session, null);
     },
 
-    getResults(sessionId: string, studentId: string): AssessmentResult {
-      const session = ownSession(store, sessionId, studentId);
+    async getResults(sessionId: string, studentId: string): Promise<AssessmentResult> {
+      const session = await ownSession(store, sessionId, studentId);
       if (session.status !== "completed") fail(409, "assessment_not_completed");
       return synthesizeResult(session);
     },
@@ -521,9 +524,10 @@ export function createAssessmentEngine(deps: AssessmentEngineDeps) {
      * Consumed by the goal engine so diagnosis context is resolved from
      * the owner's own history — never carried by the client.
      */
-    getLatestCompletedResult(studentId: string): AssessmentResult | null {
-      const completed = store
-        .listByStudent(studentId)
+    async getLatestCompletedResult(studentId: string): Promise<AssessmentResult | null> {
+      // Copy before sorting: a synchronous adapter hands back its live
+      // array, and sorting it in place would reorder the store itself.
+      const completed = (await store.listByStudent(studentId))
         .filter((s) => s.status === "completed")
         .sort((a, b) =>
           (b.completedAt ?? b.startedAt).localeCompare(a.completedAt ?? a.startedAt),
@@ -532,8 +536,8 @@ export function createAssessmentEngine(deps: AssessmentEngineDeps) {
     },
 
     /** Test seam: clears this engine's persisted sessions. */
-    __reset(): void {
-      store.clear();
+    async __reset(): Promise<void> {
+      await store.clear();
     },
   };
 }

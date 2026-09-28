@@ -75,10 +75,10 @@ function wrongResponseFor(question: AssessmentQuestion): AssessmentResponse {
   }
 }
 
-function answer(
+async function answer(
   session: AssessmentSession,
   build: (q: AssessmentQuestion) => AssessmentResponse,
-): AssessmentSession {
+): Promise<AssessmentSession> {
   const question = session.currentQuestion;
   if (!question) throw new Error("no current question");
   return mockAssessmentEngine.submitAnswer({
@@ -88,13 +88,13 @@ function answer(
   }, STUDENT);
 }
 
-function answerCorrectly(session: AssessmentSession): AssessmentSession {
-  return answer(session, (q) => correctResponseFor(q));
+async function answerCorrectly(session: AssessmentSession): Promise<AssessmentSession> {
+  return await answer(session, (q) => correctResponseFor(q));
 }
 
-function apiErrorOf(fn: () => unknown): ApiError {
+async function apiErrorOf(fn: () => Promise<unknown>): Promise<ApiError> {
   try {
-    fn();
+    await fn();
   } catch (error) {
     expect(error).toBeInstanceOf(ApiError);
     return error as ApiError;
@@ -103,13 +103,13 @@ function apiErrorOf(fn: () => unknown): ApiError {
 }
 
 describe("mock assessment engine", () => {
-  beforeEach(() => {
-    mockAssessmentEngine.__reset();
+  beforeEach(async () => {
+    await mockAssessmentEngine.__reset();
   });
 
   describe("session lifecycle", () => {
-    it("creates an in-progress session with a first question", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
+    it("creates an in-progress session with a first question", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
       expect(session.id).toMatch(/^asess_/);
       expect(session.status).toBe("in_progress");
       expect(session.currentQuestion).not.toBeNull();
@@ -117,56 +117,55 @@ describe("mock assessment engine", () => {
       expect(session.estimatedDurationMinutes).toBeGreaterThan(0);
     });
 
-    it("starts every session at foundational difficulty", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
+    it("starts every session at foundational difficulty", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
       expect(session.currentQuestion?.difficulty).toBe("foundational");
     });
 
-    it("returns the session by id and 404s for unknown ids", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
-      expect(mockAssessmentEngine.getSession(session.id, STUDENT).id).toBe(session.id);
-      const error = apiErrorOf(() => mockAssessmentEngine.getSession("asess_nope", STUDENT));
+    it("returns the session by id and 404s for unknown ids", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
+      expect((await mockAssessmentEngine.getSession(session.id, STUDENT)).id).toBe(session.id);
+      const error = await apiErrorOf(async () => await mockAssessmentEngine.getSession("asess_nope", STUDENT));
       expect(error.status).toBe(404);
       expect(error.code).toBe("session_not_found");
     });
 
-    it("tracks the active session and clears it on completion", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
-      expect(mockAssessmentEngine.getActiveSession(STUDENT)?.id).toBe(session.id);
-      mockAssessmentEngine.completeSession(session.id, STUDENT);
-      expect(mockAssessmentEngine.getActiveSession(STUDENT)).toBeNull();
+    it("tracks the active session and clears it on completion", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
+      expect((await mockAssessmentEngine.getActiveSession(STUDENT))?.id).toBe(session.id);
+      await mockAssessmentEngine.completeSession(session.id, STUDENT);
+      expect(await mockAssessmentEngine.getActiveSession(STUDENT)).toBeNull();
     });
 
-    it("supersedes an unfinished session when a new one is created", () => {
-      const first = mockAssessmentEngine.createSession(STUDENT);
-      const second = mockAssessmentEngine.createSession(STUDENT);
+    it("supersedes an unfinished session when a new one is created", async () => {
+      const first = await mockAssessmentEngine.createSession(STUDENT);
+      const second = await mockAssessmentEngine.createSession(STUDENT);
       expect(second.id).not.toBe(first.id);
-      expect(mockAssessmentEngine.getSession(first.id, STUDENT).status).toBe("expired");
-      expect(mockAssessmentEngine.getActiveSession(STUDENT)?.id).toBe(second.id);
+      expect((await mockAssessmentEngine.getSession(first.id, STUDENT)).status).toBe("expired");
+      expect((await mockAssessmentEngine.getActiveSession(STUDENT))?.id).toBe(second.id);
     });
 
-    it("pauses and resumes without losing progress", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
-      session = answerCorrectly(session);
+    it("pauses and resumes without losing progress", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
+      session = await answerCorrectly(session);
 
-      const paused = mockAssessmentEngine.pauseSession(session.id, STUDENT);
+      const paused = await mockAssessmentEngine.pauseSession(session.id, STUDENT);
       expect(paused.status).toBe("paused");
       expect(paused.currentQuestion).toBeNull();
       expect(paused.progress.questionsAnswered).toBe(1);
 
-      const resumed = mockAssessmentEngine.resumeSession(session.id, STUDENT);
+      const resumed = await mockAssessmentEngine.resumeSession(session.id, STUDENT);
       expect(resumed.status).toBe("in_progress");
       expect(resumed.currentQuestion).not.toBeNull();
       expect(resumed.progress.questionsAnswered).toBe(1);
     });
 
-    it("rejects answers submitted to a paused session", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
-      mockAssessmentEngine.pauseSession(session.id, STUDENT);
-      const question = mockAssessmentEngine.resumeSession(session.id, STUDENT).currentQuestion;
-      mockAssessmentEngine.pauseSession(session.id, STUDENT);
-      const error = apiErrorOf(() =>
-        mockAssessmentEngine.submitAnswer({
+    it("rejects answers submitted to a paused session", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
+      await mockAssessmentEngine.pauseSession(session.id, STUDENT);
+      const question = (await mockAssessmentEngine.resumeSession(session.id, STUDENT)).currentQuestion;
+      await mockAssessmentEngine.pauseSession(session.id, STUDENT);
+      const error = await apiErrorOf(async () => await mockAssessmentEngine.submitAnswer({
           sessionId: session.id,
           response: correctResponseFor(question!),
           submissionId: "sub_paused",
@@ -176,13 +175,12 @@ describe("mock assessment engine", () => {
       expect(error.code).toBe("session_not_active");
     });
 
-    it("completes explicitly and rejects further answers", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
-      const completed = mockAssessmentEngine.completeSession(session.id, STUDENT);
+    it("completes explicitly and rejects further answers", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
+      const completed = await mockAssessmentEngine.completeSession(session.id, STUDENT);
       expect(completed.status).toBe("completed");
       expect(completed.currentQuestion).toBeNull();
-      const error = apiErrorOf(() =>
-        mockAssessmentEngine.submitAnswer({
+      const error = await apiErrorOf(async () => await mockAssessmentEngine.submitAnswer({
           sessionId: session.id,
           response: { type: "short_answer", questionId: "fn_a1", answer: "late" },
           submissionId: "sub_late",
@@ -193,55 +191,55 @@ describe("mock assessment engine", () => {
   });
 
   describe("adaptive behavior", () => {
-    it("returns a next question after each answer and counts progress", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
+    it("returns a next question after each answer and counts progress", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
       const firstId = session.currentQuestion?.id;
-      session = answerCorrectly(session);
+      session = await answerCorrectly(session);
       expect(session.progress.questionsAnswered).toBe(1);
       expect(session.currentQuestion).not.toBeNull();
       expect(session.currentQuestion?.id).not.toBe(firstId);
     });
 
-    it("rotates across topics before deepening (coverage first)", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
+    it("rotates across topics before deepening (coverage first)", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
       const topics = new Set<string>();
       for (let i = 0; i < 5 && session.currentQuestion; i += 1) {
         topics.add(session.currentQuestion.topic);
-        session = answerCorrectly(session);
+        session = await answerCorrectly(session);
       }
       expect(topics.size).toBe(5);
     });
 
-    it("steps difficulty up after correct answers", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
+    it("steps difficulty up after correct answers", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
       // Five correct answers cover every topic once; the sixth must deepen.
-      for (let i = 0; i < 5; i += 1) session = answerCorrectly(session);
+      for (let i = 0; i < 5; i += 1) session = await answerCorrectly(session);
       expect(session.currentQuestion?.difficulty).toBe("intermediate");
     });
 
-    it("never asks the same question twice", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
+    it("never asks the same question twice", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
       const asked = new Set<string>();
       while (session.currentQuestion && session.status === "in_progress") {
         expect(asked.has(session.currentQuestion.id)).toBe(false);
         asked.add(session.currentQuestion.id);
-        session = answerCorrectly(session);
+        session = await answerCorrectly(session);
       }
       expect(asked.size).toBeGreaterThanOrEqual(8);
     });
 
-    it("emits adaptation notes the UI can render (without engine internals)", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
-      session = answerCorrectly(session);
+    it("emits adaptation notes the UI can render (without engine internals)", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
+      session = await answerCorrectly(session);
       // Topic rotation on the second question → "moving_on".
       expect(session.adaptationNote).toBe("moving_on");
     });
 
-    it("completes on its own once coverage and minimum length are met", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
+    it("completes on its own once coverage and minimum length are met", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
       let guard = 0;
       while (session.status === "in_progress" && guard < 20) {
-        session = answerCorrectly(session);
+        session = await answerCorrectly(session);
         guard += 1;
       }
       expect(session.status).toBe("completed");
@@ -253,25 +251,24 @@ describe("mock assessment engine", () => {
   });
 
   describe("submission safety", () => {
-    it("is idempotent: a replayed submissionId never double-counts", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
+    it("is idempotent: a replayed submissionId never double-counts", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
       const question = session.currentQuestion!;
       const payload = {
         sessionId: session.id,
         response: correctResponseFor(question),
         submissionId: "sub_retry_1",
       };
-      const first = mockAssessmentEngine.submitAnswer(payload, STUDENT);
-      const replay = mockAssessmentEngine.submitAnswer(payload, STUDENT);
+      const first = await mockAssessmentEngine.submitAnswer(payload, STUDENT);
+      const replay = await mockAssessmentEngine.submitAnswer(payload, STUDENT);
       expect(first.progress.questionsAnswered).toBe(1);
       expect(replay.progress.questionsAnswered).toBe(1);
       expect(replay.currentQuestion?.id).toBe(first.currentQuestion?.id);
     });
 
-    it("rejects a response for a question that is not current", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
-      const error = apiErrorOf(() =>
-        mockAssessmentEngine.submitAnswer({
+    it("rejects a response for a question that is not current", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
+      const error = await apiErrorOf(async () => await mockAssessmentEngine.submitAnswer({
           sessionId: session.id,
           response: { type: "short_answer", questionId: "sc_a1", answer: "out of order" },
           submissionId: "sub_wrong_question",
@@ -281,11 +278,10 @@ describe("mock assessment engine", () => {
       expect(error.code).toBe("invalid_response");
     });
 
-    it("rejects a response whose type does not match the question", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
+    it("rejects a response whose type does not match the question", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
       const question = session.currentQuestion!;
-      const error = apiErrorOf(() =>
-        mockAssessmentEngine.submitAnswer({
+      const error = await apiErrorOf(async () => await mockAssessmentEngine.submitAnswer({
           sessionId: session.id,
           response: { type: "short_answer", questionId: question.id, answer: "wrong shape" },
           submissionId: "sub_wrong_type",
@@ -296,17 +292,17 @@ describe("mock assessment engine", () => {
   });
 
   describe("diagnostic results", () => {
-    it("refuses results before completion", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
-      const error = apiErrorOf(() => mockAssessmentEngine.getResults(session.id, STUDENT));
+    it("refuses results before completion", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
+      const error = await apiErrorOf(async () => await mockAssessmentEngine.getResults(session.id, STUDENT));
       expect(error.status).toBe(409);
       expect(error.code).toBe("assessment_not_completed");
     });
 
-    it("reports strengths and a recommended starting point after strong answers", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
-      while (session.status === "in_progress") session = answerCorrectly(session);
-      const result = mockAssessmentEngine.getResults(session.id, STUDENT);
+    it("reports strengths and a recommended starting point after strong answers", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
+      while (session.status === "in_progress") session = await answerCorrectly(session);
+      const result = await mockAssessmentEngine.getResults(session.id, STUDENT);
 
       expect(result.questionsAnswered).toBeGreaterThanOrEqual(8);
       expect(result.strengths.length).toBeGreaterThan(0);
@@ -317,32 +313,32 @@ describe("mock assessment engine", () => {
       expect(result).not.toHaveProperty("overallReadiness");
     });
 
-    it("reports knowledge gaps and a foundational start after wrong answers", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
-      while (session.status === "in_progress") session = answer(session, wrongResponseFor);
-      const result = mockAssessmentEngine.getResults(session.id, STUDENT);
+    it("reports knowledge gaps and a foundational start after wrong answers", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
+      while (session.status === "in_progress") session = await answer(session, wrongResponseFor);
+      const result = await mockAssessmentEngine.getResults(session.id, STUDENT);
 
       expect(result.knowledgeGaps.length).toBeGreaterThan(0);
       expect(result.strengths).toHaveLength(0);
       expect(result.recommendedStartingPoint?.level).toBe("foundational");
     });
 
-    it("keeps confidence low for an abandoned-early session", () => {
-      const session = mockAssessmentEngine.createSession(STUDENT);
-      mockAssessmentEngine.completeSession(session.id, STUDENT);
-      const result = mockAssessmentEngine.getResults(session.id, STUDENT);
+    it("keeps confidence low for an abandoned-early session", async () => {
+      const session = await mockAssessmentEngine.createSession(STUDENT);
+      await mockAssessmentEngine.completeSession(session.id, STUDENT);
+      const result = await mockAssessmentEngine.getResults(session.id, STUDENT);
       expect(result.questionsAnswered).toBe(0);
       expect(result.confidence).toBe("low");
       expect(result.recommendedStartingPoint).toBeNull();
     });
 
-    it("never leaks scoring data through questions or results", () => {
-      let session = mockAssessmentEngine.createSession(STUDENT);
+    it("never leaks scoring data through questions or results", async () => {
+      let session = await mockAssessmentEngine.createSession(STUDENT);
       const serialized = JSON.stringify(session.currentQuestion);
       expect(serialized).not.toContain("correctOptionId");
       expect(serialized).not.toContain("keywords");
-      while (session.status === "in_progress") session = answerCorrectly(session);
-      const resultJson = JSON.stringify(mockAssessmentEngine.getResults(session.id, STUDENT));
+      while (session.status === "in_progress") session = await answerCorrectly(session);
+      const resultJson = JSON.stringify(await mockAssessmentEngine.getResults(session.id, STUDENT));
       expect(resultJson).not.toContain("correctOptionId");
       expect(resultJson).not.toContain("points");
     });

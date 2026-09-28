@@ -14,6 +14,6 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(req: Request): Promise<NextResponse> {
   return withStudent(req, async (student) =>
-    NextResponse.json(mockAssessmentEngine.getLatestCompletedResult(student.id)),
+    NextResponse.json(await mockAssessmentEngine.getLatestCompletedResult(student.id)),
   );
 }

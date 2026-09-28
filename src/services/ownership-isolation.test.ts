@@ -45,14 +45,14 @@ function jsInput(): GoalDiscoveryInput {
 }
 
 /** A locked goal + active roadmap owned by `studentId`. */
-function roadmapFor(studentId: string, key: string) {
-  const { goal } = mockGoalEngine.createGoal(jsInput(), {
+async function roadmapFor(studentId: string, key: string) {
+  const { goal } = await mockGoalEngine.createGoal(jsInput(), {
     studentId,
     idempotencyKey: `key-${key}`,
     diagnosisContext: null,
   });
-  const locked = mockGoalEngine.lockGoal(goal.id, studentId, `lock-${key}`);
-  return { goal: locked, roadmap: mockRoadmapEngine.generateRoadmap(locked.id, studentId).roadmap };
+  const locked = await mockGoalEngine.lockGoal(goal.id, studentId, `lock-${key}`);
+  return { goal: locked, roadmap: (await mockRoadmapEngine.generateRoadmap(locked.id, studentId)).roadmap };
 }
 
 function answerFor(session: AssessmentSession, submissionId: string): SubmitAnswerPayload {
@@ -66,85 +66,85 @@ function answerFor(session: AssessmentSession, submissionId: string): SubmitAnsw
 }
 
 /** Plays a session to completion so a diagnosis exists. */
-function completedSession(studentId: string): AssessmentResult {
-  let session = mockAssessmentEngine.createSession(studentId);
+async function completedSession(studentId: string): Promise<AssessmentResult> {
+  let session = await mockAssessmentEngine.createSession(studentId);
   for (let i = 0; i < 40 && session.status === "in_progress"; i += 1) {
-    session = mockAssessmentEngine.submitAnswer(answerFor(session, `sub_${i}`), studentId);
+    session = await mockAssessmentEngine.submitAnswer(answerFor(session, `sub_${i}`), studentId);
   }
   if (session.status === "in_progress") {
-    session = mockAssessmentEngine.completeSession(session.id, studentId);
+    session = await mockAssessmentEngine.completeSession(session.id, studentId);
   }
   return mockAssessmentEngine.getResults(session.id, studentId);
 }
 
-beforeEach(() => {
-  mockAssessmentEngine.__reset();
-  mockGoalEngine.__reset();
-  mockRoadmapEngine.__reset();
-  mockExecutionEngine.__reset();
+beforeEach(async () => {
+  await mockAssessmentEngine.__reset();
+  await mockGoalEngine.__reset();
+  await mockRoadmapEngine.__reset();
+  await mockExecutionEngine.__reset();
 });
 
 describe("isolation — assessment sessions (§43.6)", () => {
-  it("never hands student B student A's active session", () => {
-    const a = mockAssessmentEngine.createSession(STUDENT_A);
-    expect(mockAssessmentEngine.getActiveSession(STUDENT_A)?.id).toBe(a.id);
-    expect(mockAssessmentEngine.getActiveSession(STUDENT_B)).toBeNull();
+  it("never hands student B student A's active session", async () => {
+    const a = await mockAssessmentEngine.createSession(STUDENT_A);
+    expect((await mockAssessmentEngine.getActiveSession(STUDENT_A))?.id).toBe(a.id);
+    expect(await mockAssessmentEngine.getActiveSession(STUDENT_B)).toBeNull();
   });
 
-  it("reads a foreign session as missing, not as forbidden", () => {
-    const a = mockAssessmentEngine.createSession(STUDENT_A);
+  it("reads a foreign session as missing, not as forbidden", async () => {
+    const a = await mockAssessmentEngine.createSession(STUDENT_A);
     // A 403 would confirm the id exists. Existence must not leak.
-    expect(() => mockAssessmentEngine.getSession(a.id, STUDENT_B)).toThrow(
+    await expect(mockAssessmentEngine.getSession(a.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404, code: "session_not_found" }),
     );
   });
 
-  it("rejects every mutating call from a non-owner", () => {
-    const a = mockAssessmentEngine.createSession(STUDENT_A);
+  it("rejects every mutating call from a non-owner", async () => {
+    const a = await mockAssessmentEngine.createSession(STUDENT_A);
     const payload = answerFor(a, "sub_b");
-    expect(() => mockAssessmentEngine.submitAnswer(payload, STUDENT_B)).toThrow(
+    await expect(mockAssessmentEngine.submitAnswer(payload, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404 }),
     );
-    expect(() => mockAssessmentEngine.pauseSession(a.id, STUDENT_B)).toThrow(
+    await expect(mockAssessmentEngine.pauseSession(a.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404 }),
     );
-    expect(() => mockAssessmentEngine.resumeSession(a.id, STUDENT_B)).toThrow(
+    await expect(mockAssessmentEngine.resumeSession(a.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404 }),
     );
-    expect(() => mockAssessmentEngine.completeSession(a.id, STUDENT_B)).toThrow(
+    await expect(mockAssessmentEngine.completeSession(a.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404 }),
     );
-    expect(() => mockAssessmentEngine.getResults(a.id, STUDENT_B)).toThrow(
+    await expect(mockAssessmentEngine.getResults(a.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404 }),
     );
   });
 
-  it("leaves the owner's session untouched by the rejected calls", () => {
-    const a = mockAssessmentEngine.createSession(STUDENT_A);
-    expect(() => mockAssessmentEngine.submitAnswer(answerFor(a, "sub_b"), STUDENT_B)).toThrow();
-    const stillMine = mockAssessmentEngine.getSession(a.id, STUDENT_A);
+  it("leaves the owner's session untouched by the rejected calls", async () => {
+    const a = await mockAssessmentEngine.createSession(STUDENT_A);
+    await expect(mockAssessmentEngine.submitAnswer(answerFor(a, "sub_b"), STUDENT_B)).rejects.toThrow();
+    const stillMine = await mockAssessmentEngine.getSession(a.id, STUDENT_A);
     expect(stillMine.status).toBe("in_progress");
     expect(stillMine.progress.questionsAnswered).toBe(0);
   });
 
-  it("never exposes student A's diagnosis as student B's latest result", () => {
-    completedSession(STUDENT_A);
-    expect(mockAssessmentEngine.getLatestCompletedResult(STUDENT_A)).not.toBeNull();
-    expect(mockAssessmentEngine.getLatestCompletedResult(STUDENT_B)).toBeNull();
+  it("never exposes student A's diagnosis as student B's latest result", async () => {
+    await completedSession(STUDENT_A);
+    expect(await mockAssessmentEngine.getLatestCompletedResult(STUDENT_A)).not.toBeNull();
+    expect(await mockAssessmentEngine.getLatestCompletedResult(STUDENT_B)).toBeNull();
   });
 
-  it("keeps two students' sessions distinct even for the same profile", () => {
+  it("keeps two students' sessions distinct even for the same profile", async () => {
     const profile = { targetSubject: "Biology", age: 16, stage: "high_school" as const };
-    const a = mockAssessmentEngine.createSession(STUDENT_A, profile);
-    const b = mockAssessmentEngine.createSession(STUDENT_B, profile);
+    const a = await mockAssessmentEngine.createSession(STUDENT_A, profile);
+    const b = await mockAssessmentEngine.createSession(STUDENT_B, profile);
     expect(a.id).not.toBe(b.id);
     // Each owner sees their own; neither sees the other's.
-    expect(mockAssessmentEngine.getSession(a.id, STUDENT_A).id).toBe(a.id);
-    expect(mockAssessmentEngine.getSession(b.id, STUDENT_B).id).toBe(b.id);
-    expect(() => mockAssessmentEngine.getSession(b.id, STUDENT_A)).toThrow(
+    expect((await mockAssessmentEngine.getSession(a.id, STUDENT_A)).id).toBe(a.id);
+    expect((await mockAssessmentEngine.getSession(b.id, STUDENT_B)).id).toBe(b.id);
+    await expect(mockAssessmentEngine.getSession(b.id, STUDENT_A)).rejects.toThrow(
       expect.objectContaining({ status: 404 }),
     );
-    expect(() => mockAssessmentEngine.getSession(a.id, STUDENT_B)).toThrow(
+    await expect(mockAssessmentEngine.getSession(a.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404 }),
     );
   });
@@ -180,8 +180,8 @@ describe("isolation — answer keys stay server-side (§43.7)", () => {
     },
   ];
 
-  it("never puts scoring data on the projection the client receives", () => {
-    const session = mockAssessmentEngine.createSession(STUDENT_A, undefined, {
+  it("never puts scoring data on the projection the client receives", async () => {
+    const session = await mockAssessmentEngine.createSession(STUDENT_A, undefined, {
       bank: generatedBank,
       topics: ["closures"],
     });
@@ -197,13 +197,13 @@ describe("isolation — answer keys stay server-side (§43.7)", () => {
    * session with a correct keyword answer, then returns the diagnosis.
    * `extra` is whatever the client tries to smuggle into the payload.
    */
-  function gradedWithExtra(extra: Record<string, unknown>): AssessmentResult {
-    mockAssessmentEngine.__reset();
-    let session = mockAssessmentEngine.createSession(STUDENT_A, undefined, {
+  async function gradedWithExtra(extra: Record<string, unknown>): Promise<AssessmentResult> {
+    await mockAssessmentEngine.__reset();
+    let session = await mockAssessmentEngine.createSession(STUDENT_A, undefined, {
       bank: generatedBank,
       topics: ["closures"],
     });
-    session = mockAssessmentEngine.submitAnswer(
+    session = await mockAssessmentEngine.submitAnswer(
       {
         sessionId: session.id,
         response: {
@@ -217,7 +217,7 @@ describe("isolation — answer keys stay server-side (§43.7)", () => {
       STUDENT_A,
     );
     for (let i = 0; i < 40 && session.status === "in_progress"; i += 1) {
-      session = mockAssessmentEngine.submitAnswer(
+      session = await mockAssessmentEngine.submitAnswer(
         {
           sessionId: session.id,
           response: {
@@ -231,14 +231,14 @@ describe("isolation — answer keys stay server-side (§43.7)", () => {
       );
     }
     if (session.status === "in_progress") {
-      mockAssessmentEngine.completeSession(session.id, STUDENT_A);
+      await mockAssessmentEngine.completeSession(session.id, STUDENT_A);
     }
     return mockAssessmentEngine.getResults(session.id, STUDENT_A);
   }
 
-  it("keeps grading the server's job — the client cannot declare itself correct", () => {
+  it("keeps grading the server's job — the client cannot declare itself correct", async () => {
     // Wrong answer + a smuggled `correct: true`.
-    const result = gradedWithExtra({ correct: true, score: 100, isCorrect: true });
+    const result = await gradedWithExtra({ correct: true, score: 100, isCorrect: true });
 
     // The engine graded it from its OWN key: the topic the student got
     // wrong lands in developingAreas, and is NOT reported as a strength.
@@ -247,23 +247,23 @@ describe("isolation — answer keys stay server-side (§43.7)", () => {
     expect(JSON.stringify(result)).not.toContain('"correct":true');
   });
 
-  it("grades the same submission identically regardless of any client verdict", () => {
+  it("grades the same submission identically regardless of any client verdict", async () => {
     // Per-run fields only — everything graded must be byte-identical.
     const graded = ({ sessionId, completedAt, ...rest }: AssessmentResult) => {
       void sessionId;
       void completedAt;
       return JSON.stringify(rest);
     };
-    expect(graded(gradedWithExtra({}))).toBe(graded(gradedWithExtra({ correct: true })));
+    expect(graded(await gradedWithExtra({}))).toBe(graded(await gradedWithExtra({ correct: true })));
   });
 
-  it("grades a correct answer as a strength — the control for the two above", () => {
-    mockAssessmentEngine.__reset();
-    let session = mockAssessmentEngine.createSession(STUDENT_A, undefined, {
+  it("grades a correct answer as a strength — the control for the two above", async () => {
+    await mockAssessmentEngine.__reset();
+    let session = await mockAssessmentEngine.createSession(STUDENT_A, undefined, {
       bank: generatedBank,
       topics: ["closures"],
     });
-    session = mockAssessmentEngine.submitAnswer(
+    session = await mockAssessmentEngine.submitAnswer(
       {
         sessionId: session.id,
         response: {
@@ -276,7 +276,7 @@ describe("isolation — answer keys stay server-side (§43.7)", () => {
       STUDENT_A,
     );
     for (let i = 0; i < 40 && session.status === "in_progress"; i += 1) {
-      session = mockAssessmentEngine.submitAnswer(
+      session = await mockAssessmentEngine.submitAnswer(
         {
           sessionId: session.id,
           response: {
@@ -290,63 +290,63 @@ describe("isolation — answer keys stay server-side (§43.7)", () => {
       );
     }
     if (session.status === "in_progress") {
-      mockAssessmentEngine.completeSession(session.id, STUDENT_A);
+      await mockAssessmentEngine.completeSession(session.id, STUDENT_A);
     }
-    const result = mockAssessmentEngine.getResults(session.id, STUDENT_A);
+    const result = await mockAssessmentEngine.getResults(session.id, STUDENT_A);
     expect(result.strengths.map((s) => s.topic)).toContain("closures");
     expect(result.developingAreas.map((d) => d.topic)).not.toContain("closures");
   });
 });
 
 describe("isolation — goals, roadmaps and executions", () => {
-  it("hides student A's goal from student B", () => {
-    const { goal } = roadmapFor(STUDENT_A, "a");
-    expect(mockGoalEngine.getGoal(goal.id, STUDENT_A).id).toBe(goal.id);
+  it("hides student A's goal from student B", async () => {
+    const { goal } = await roadmapFor(STUDENT_A, "a");
+    expect((await mockGoalEngine.getGoal(goal.id, STUDENT_A)).id).toBe(goal.id);
     // Preserved contract: goals answer 403. Unifying it with the 404s used
     // by roadmaps/assessments is a deliberate Phase 3 API decision.
-    expect(() => mockGoalEngine.getGoal(goal.id, STUDENT_B)).toThrow(
+    await expect(mockGoalEngine.getGoal(goal.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 403, code: "forbidden" }),
     );
   });
 
-  it("hides student A's roadmap from student B", () => {
-    const { roadmap } = roadmapFor(STUDENT_A, "a");
-    expect(mockRoadmapEngine.getRoadmap(roadmap.id, STUDENT_A).id).toBe(roadmap.id);
-    expect(() => mockRoadmapEngine.getRoadmap(roadmap.id, STUDENT_B)).toThrow(
+  it("hides student A's roadmap from student B", async () => {
+    const { roadmap } = await roadmapFor(STUDENT_A, "a");
+    expect((await mockRoadmapEngine.getRoadmap(roadmap.id, STUDENT_A)).id).toBe(roadmap.id);
+    await expect(mockRoadmapEngine.getRoadmap(roadmap.id, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ status: 404, code: "roadmap_not_found" }),
     );
-    expect(mockRoadmapEngine.getActiveRoadmap(STUDENT_B)).toBeNull();
+    expect(await mockRoadmapEngine.getActiveRoadmap(STUDENT_B)).toBeNull();
   });
 
-  it("cannot drive student A's learning unit as student B", () => {
-    const { roadmap } = roadmapFor(STUDENT_A, "a");
+  it("cannot drive student A's learning unit as student B", async () => {
+    const { roadmap } = await roadmapFor(STUDENT_A, "a");
     const unitId = roadmap.milestones[0]!.learningUnits[0]!.id;
 
     // Nothing has been started yet, so A has no execution record either —
     // the derived view is what reports the unit as reachable.
-    expect(mockExecutionEngine.getExecutionState(unitId, STUDENT_A)).toBeNull();
-    expect(mockExecutionEngine.getExecutionView(STUDENT_A)?.unitStates[unitId]).toBe("available");
+    expect(await mockExecutionEngine.getExecutionState(unitId, STUDENT_A)).toBeNull();
+    expect((await mockExecutionEngine.getExecutionView(STUDENT_A))?.unitStates[unitId]).toBe("available");
     // B has no active roadmap, so A's unit is unreachable for B — every
     // entry point refuses rather than resolving someone else's unit.
-    expect(() => mockExecutionEngine.getExecutionState(unitId, STUDENT_B)).toThrow(
+    await expect(mockExecutionEngine.getExecutionState(unitId, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ name: "LearningUnitUnavailableError", reason: "no_active_roadmap" }),
     );
-    expect(() => mockExecutionEngine.startLearningUnit(unitId, STUDENT_B)).toThrow(
+    await expect(mockExecutionEngine.startLearningUnit(unitId, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ name: "LearningUnitUnavailableError", reason: "no_active_roadmap" }),
     );
-    expect(() => mockExecutionEngine.getUnitContext(unitId, STUDENT_B)).toThrow(
+    await expect(mockExecutionEngine.getUnitContext(unitId, STUDENT_B)).rejects.toThrow(
       expect.objectContaining({ name: "LearningUnitUnavailableError", reason: "no_active_roadmap" }),
     );
-    expect(mockExecutionEngine.getExecutionView(STUDENT_B)).toBeNull();
+    expect(await mockExecutionEngine.getExecutionView(STUDENT_B)).toBeNull();
   });
 
-  it("keeps a unit started by A invisible to B", () => {
-    const { roadmap } = roadmapFor(STUDENT_A, "a");
+  it("keeps a unit started by A invisible to B", async () => {
+    const { roadmap } = await roadmapFor(STUDENT_A, "a");
     const unitId = roadmap.milestones[0]!.learningUnits[0]!.id;
-    const started = mockExecutionEngine.startLearningUnit(unitId, STUDENT_A);
+    const started = await mockExecutionEngine.startLearningUnit(unitId, STUDENT_A);
     expect(started.status).toBe("in_progress");
     expect(started.studentId).toBe(STUDENT_A);
-    expect(() => mockExecutionEngine.getExecutionState(unitId, STUDENT_B)).toThrow();
-    expect(mockExecutionEngine.getExecutionView(STUDENT_A)?.unitStates[unitId]).toBe("in_progress");
+    await expect(mockExecutionEngine.getExecutionState(unitId, STUDENT_B)).rejects.toThrow();
+    expect((await mockExecutionEngine.getExecutionView(STUDENT_A))?.unitStates[unitId]).toBe("in_progress");
   });
 });

@@ -152,8 +152,8 @@ describe("AssessmentIntro", () => {
   });
 
   it("offers an unfinished session first so progress is never lost by accident", async () => {
-    let session = mockAssessmentEngine.createSession(STUDENT);
-    session = mockAssessmentEngine.submitAnswer({
+    let session = await mockAssessmentEngine.createSession(STUDENT);
+    session = await mockAssessmentEngine.submitAnswer({
       sessionId: session.id,
       response: (() => {
         const q = session.currentQuestion!;
@@ -181,7 +181,7 @@ describe("AssessmentIntro", () => {
 
   it("warns before discarding an in-progress session", async () => {
     const user = userEvent.setup();
-    mockAssessmentEngine.createSession(STUDENT);
+    await mockAssessmentEngine.createSession(STUDENT);
     renderIntro();
 
     await screen.findByRole("heading", { name: "Continue your assessment" });

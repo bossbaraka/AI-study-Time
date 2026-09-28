@@ -7,10 +7,10 @@
  * store for the server/tests and a localStorage store for the browser
  * mock runtime. Phase 2 adds Prisma adapters behind the SAME interfaces.
  *
- * Signatures are synchronous in Phase 1 because both current adapters
- * are synchronous. They become `async` in Phase 2 when Prisma lands —
- * the call sites are already isolated to the engines, so the change is
- * mechanical and does not touch domain rules.
+ * Every method is `async`. Real persistence (Prisma/PostgreSQL) is
+ * asynchronous, so the ports are too; the in-memory and localStorage
+ * adapters simply resolve immediately. Keeping the ports async from the
+ * start means swapping adapters never changes an engine signature.
  *
  * Deliberately minimal: one store per aggregate root, shaped the way a
  * database row is fetched and written. No `GenericRepository<T>`, no
@@ -78,12 +78,12 @@ export interface StoredAssessmentSession {
 
 export interface AssessmentSessionStore {
   /** Every session owned by one student. */
-  listByStudent(studentId: string): StoredAssessmentSession[];
-  findById(id: string): StoredAssessmentSession | undefined;
+  listByStudent(studentId: string): Promise<StoredAssessmentSession[]>;
+  findById(id: string): Promise<StoredAssessmentSession | undefined>;
   /** Insert or replace by id. */
-  upsert(session: StoredAssessmentSession): void;
+  upsert(session: StoredAssessmentSession): Promise<void>;
   /** Test seam. Prisma implements this as `deleteMany()`. */
-  clear(): void;
+  clear(): Promise<void>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -91,11 +91,11 @@ export interface AssessmentSessionStore {
 /* ------------------------------------------------------------------ */
 
 export interface GoalStore {
-  listByStudent(studentId: string): LearningGoal[];
-  findById(id: string): LearningGoal | undefined;
-  upsert(goal: LearningGoal): void;
+  listByStudent(studentId: string): Promise<LearningGoal[]>;
+  findById(id: string): Promise<LearningGoal | undefined>;
+  upsert(goal: LearningGoal): Promise<void>;
   /** Test seam. Prisma implements this as `deleteMany()`. */
-  clear(): void;
+  clear(): Promise<void>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -103,11 +103,11 @@ export interface GoalStore {
 /* ------------------------------------------------------------------ */
 
 export interface RoadmapStore {
-  listByStudent(studentId: string): Roadmap[];
-  findById(id: string): Roadmap | undefined;
-  upsert(roadmap: Roadmap): void;
+  listByStudent(studentId: string): Promise<Roadmap[]>;
+  findById(id: string): Promise<Roadmap | undefined>;
+  upsert(roadmap: Roadmap): Promise<void>;
   /** Test seam. Prisma implements this as `deleteMany()`. */
-  clear(): void;
+  clear(): Promise<void>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -115,10 +115,10 @@ export interface RoadmapStore {
 /* ------------------------------------------------------------------ */
 
 export interface ExecutionStore {
-  listByRoadmap(roadmapId: string): LearningUnitExecution[];
+  listByRoadmap(roadmapId: string): Promise<LearningUnitExecution[]>;
   /** All records — the engine needs cross-roadmap reads for retries. */
-  list(): LearningUnitExecution[];
-  upsert(execution: LearningUnitExecution): void;
+  list(): Promise<LearningUnitExecution[]>;
+  upsert(execution: LearningUnitExecution): Promise<void>;
   /** Test seam. Prisma implements this as `deleteMany()`. */
-  clear(): void;
+  clear(): Promise<void>;
 }

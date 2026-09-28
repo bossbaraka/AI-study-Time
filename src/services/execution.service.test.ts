@@ -40,24 +40,24 @@ let studentId = "";
 let roadmap: Roadmap;
 let firstUnitId: string;
 
-function seedFor(who: string, key: string): Roadmap {
-  const created = mockGoalEngine.createGoal(jsInput(), {
+async function seedFor(who: string, key: string): Promise<Roadmap> {
+  const created = await mockGoalEngine.createGoal(jsInput(), {
     studentId: who,
     idempotencyKey: `${key}-c`,
     diagnosisContext: null,
   });
-  const locked = mockGoalEngine.lockGoal(created.goal.id, who, `${key}-l`);
-  return mockRoadmapEngine.generateRoadmap(locked.id, who).roadmap;
+  const locked = await mockGoalEngine.lockGoal(created.goal.id, who, `${key}-l`);
+  return (await mockRoadmapEngine.generateRoadmap(locked.id, who)).roadmap;
 }
 
 beforeEach(async () => {
-  mockExecutionEngine.__reset();
-  mockRoadmapEngine.__reset();
-  mockGoalEngine.__reset();
+  await mockExecutionEngine.__reset();
+  await mockRoadmapEngine.__reset();
+  await mockGoalEngine.__reset();
   await authService.logout().catch(() => undefined);
   const { session } = await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
   studentId = session.user.id;
-  roadmap = seedFor(studentId, "svc-main");
+  roadmap = await seedFor(studentId, "svc-main");
   firstUnitId = [...roadmap.milestones].sort((a, b) => a.order - b.order)[0]!
     .learningUnits.sort((a, b) => a.order - b.order)[0]!.id;
 });
@@ -144,7 +144,7 @@ describe("executionService — student lifecycle", () => {
     expect(nextContext.unit.id).not.toBe(firstUnitId);
 
     // The plan itself was never mutated by execution (§14).
-    const untouched = mockRoadmapEngine.getRoadmap(roadmap.id, studentId);
+    const untouched = await mockRoadmapEngine.getRoadmap(roadmap.id, studentId);
     expect(untouched.updatedAt).toBe(roadmap.updatedAt);
     expect(untouched.status).toBe("active");
   });
@@ -206,8 +206,8 @@ describe("executionService — idempotency & isolation (§16/§18)", () => {
 
     // A second student with their OWN roadmap: same capability-based unit
     // ids, completely separate runtime state.
-    seedFor("student_other", "svc-other");
-    const otherView = mockExecutionEngine.getExecutionView("student_other");
+    await seedFor("student_other", "svc-other");
+    const otherView = await mockExecutionEngine.getExecutionView("student_other");
     expect(otherView?.unitStates[firstUnitId]).toBe("available");
 
     // The session student still sees exactly their own state.

@@ -98,8 +98,12 @@ function newRoadmapId(): string {
   return `rm_${random}`;
 }
 
-function ownRoadmap(store: RoadmapStore, roadmapId: string, studentId: string): Roadmap {
-  const roadmap = store.findById(roadmapId);
+async function ownRoadmap(
+  store: RoadmapStore,
+  roadmapId: string,
+  studentId: string,
+): Promise<Roadmap> {
+  const roadmap = await store.findById(roadmapId);
   // Same discipline as the goal engine: existence is never leaked across
   // students — a foreign id is indistinguishable from a missing one.
   if (!roadmap || roadmap.studentId !== studentId) {
@@ -512,14 +516,14 @@ function generationKeyFor(studentId: string, goal: LearningGoal): string {
   return `${studentId}:${goal.id}:${goal.version}:${ENGINE_VERSION}`;
 }
 
-function loadLockedGoal(
+async function loadLockedGoal(
   goals: GoalLookup,
   goalId: string,
   studentId: string,
-): LearningGoal {
+): Promise<LearningGoal> {
   let goal: LearningGoal;
   try {
-    goal = goals.getGoal(goalId, studentId);
+    goal = await goals.getGoal(goalId, studentId);
   } catch (error) {
     // The goal engine guards ownership with its own typed errors.
     if (error instanceof ApiError && error.code === "goal_not_found") {
@@ -548,14 +552,18 @@ export function createRoadmapEngine(deps: RoadmapEngineDeps) {
    * Generates (or replays) the roadmap for a locked goal.
    * Idempotent on studentId + goalId + goalVersion + engineVersion (§19).
    */
-  generateRoadmap(goalId: string, studentId: string): RoadmapGenerationResult {
-    const goal = loadLockedGoal(goals, goalId, studentId);
+  async generateRoadmap(
+    goalId: string,
+    studentId: string,
+  ): Promise<RoadmapGenerationResult> {
+    const goal = await loadLockedGoal(goals, goalId, studentId);
     const generationKey = generationKeyFor(studentId, goal);
 
     // Idempotent replay: identical request → identical roadmap, no duplicate.
-    const existing = store
-      .listByStudent(studentId)
-      .find((entry) => entry.generationContext.generationKey === generationKey);
+    const owned = await store.listByStudent(studentId);
+    const existing = owned.find(
+      (entry) => entry.generationContext.generationKey === generationKey,
+    );
     if (existing) {
       return { roadmap: cloneRoadmap(existing), created: false };
     }
@@ -564,13 +572,13 @@ export function createRoadmapEngine(deps: RoadmapEngineDeps) {
     // never mutated in place (§20). Versions increase monotonically per
     // student: 1 + the highest version ever generated.
     let version = 1;
-    for (const entry of store.listByStudent(studentId)) {
+    for (const entry of owned) {
       version = Math.max(version, entry.version + 1);
       if (["draft", "active", "paused"].includes(entry.status)) {
         assertTransition(entry.status, "revised");
         entry.status = "revised";
         entry.updatedAt = nowIso();
-        store.upsert(entry);
+        await store.upsert(entry);
       }
     }
 
@@ -624,45 +632,45 @@ export function createRoadmapEngine(deps: RoadmapEngineDeps) {
     const first = roadmap.milestones[0];
     if (first) first.status = "in_progress";
 
-    store.upsert(roadmap);
+    await store.upsert(roadmap);
     return { roadmap: cloneRoadmap(roadmap), created: true };
   },
 
   /** The student's live roadmap (draft/active/paused), newest first. */
-  getActiveRoadmap(studentId: string): Roadmap | null {
+  async getActiveRoadmap(studentId: string): Promise<Roadmap | null> {
     let active: Roadmap | undefined;
-    for (const roadmap of store.listByStudent(studentId)) {
+    for (const roadmap of await store.listByStudent(studentId)) {
       if (!["draft", "active", "paused"].includes(roadmap.status)) continue;
       if (!active || roadmap.createdAt >= active.createdAt) active = roadmap;
     }
     return active ? cloneRoadmap(active) : null;
   },
 
-  getRoadmap(roadmapId: string, studentId: string): Roadmap {
-    return cloneRoadmap(ownRoadmap(store, roadmapId, studentId));
+  async getRoadmap(roadmapId: string, studentId: string): Promise<Roadmap> {
+    return cloneRoadmap(await ownRoadmap(store, roadmapId, studentId));
   },
 
-  pauseRoadmap(roadmapId: string, studentId: string): Roadmap {
-    const roadmap = ownRoadmap(store, roadmapId, studentId);
+  async pauseRoadmap(roadmapId: string, studentId: string): Promise<Roadmap> {
+    const roadmap = await ownRoadmap(store, roadmapId, studentId);
     assertTransition(roadmap.status, "paused");
     roadmap.status = "paused";
     roadmap.updatedAt = nowIso();
-    store.upsert(roadmap);
+    await store.upsert(roadmap);
     return cloneRoadmap(roadmap);
   },
 
-  resumeRoadmap(roadmapId: string, studentId: string): Roadmap {
-    const roadmap = ownRoadmap(store, roadmapId, studentId);
+  async resumeRoadmap(roadmapId: string, studentId: string): Promise<Roadmap> {
+    const roadmap = await ownRoadmap(store, roadmapId, studentId);
     assertTransition(roadmap.status, "active");
     roadmap.status = "active";
     roadmap.updatedAt = nowIso();
-    store.upsert(roadmap);
+    await store.upsert(roadmap);
     return cloneRoadmap(roadmap);
   },
 
   /** Test seam: clears this engine's persisted roadmaps. */
-  __reset(): void {
-    store.clear();
+  async __reset(): Promise<void> {
+    await store.clear();
   },
   };
 }

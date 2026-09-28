@@ -134,7 +134,7 @@ function signInAs(token: string | undefined) {
 /** Plays student A's session to a completed diagnosis. */
 async function completeAsA(sessionId: string) {
   for (let i = 0; i < 40; i += 1) {
-    const current = mockAssessmentEngine.getSession(sessionId, STUDENT_A);
+    const current = await mockAssessmentEngine.getSession(sessionId, STUDENT_A);
     if (current.status !== "in_progress") break;
     const question = current.currentQuestion!;
     const firstOptionId = question.options?.[0]?.id ?? "a";
@@ -142,27 +142,27 @@ async function completeAsA(sessionId: string) {
       question.type === "multiple_choice" || question.type === "scenario"
         ? { type: question.type, questionId: question.id, optionId: firstOptionId }
         : { type: question.type, questionId: question.id, answer: "an answer" };
-    mockAssessmentEngine.submitAnswer(
+    await mockAssessmentEngine.submitAnswer(
       { sessionId, response, submissionId: `sub_${i}` } as SubmitAnswerPayload,
       STUDENT_A,
     );
   }
-  const still = mockAssessmentEngine.getSession(sessionId, STUDENT_A);
-  if (still.status === "in_progress") mockAssessmentEngine.completeSession(sessionId, STUDENT_A);
+  const still = await mockAssessmentEngine.getSession(sessionId, STUDENT_A);
+  if (still.status === "in_progress") await mockAssessmentEngine.completeSession(sessionId, STUDENT_A);
 }
 
 async function body(res: Response) {
   return (await res.json()) as Record<string, unknown>;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   sessions.clear();
   sessions.set(TOKEN_A, { id: STUDENT_A, role: "student" });
   sessions.set(TOKEN_B, { id: STUDENT_B, role: "student" });
   sessions.set(TOKEN_GUARDIAN, { id: "guardian_01", role: "guardian" });
   cookieJar.token = undefined;
   __clearRateBuckets();
-  mockAssessmentEngine.__reset();
+  await mockAssessmentEngine.__reset();
 });
 
 describe("POST /api/assessment/sessions — authentication and ownership", () => {
@@ -172,7 +172,7 @@ describe("POST /api/assessment/sessions — authentication and ownership", () =>
     expect(res.status).toBe(401);
     expect(await body(res)).toEqual({ code: "session_expired" });
     // No session was created for anyone.
-    expect(mockAssessmentEngine.getActiveSession(STUDENT_A)).toBeNull();
+    expect(await mockAssessmentEngine.getActiveSession(STUDENT_A)).toBeNull();
   });
 
   it("refuses a signed-in guardian: only students take assessments", async () => {
@@ -188,8 +188,8 @@ describe("POST /api/assessment/sessions — authentication and ownership", () =>
     const res = await call(createSession, json({ studentId: STUDENT_B }));
     expect(res.status).toBe(201);
     const created = (await body(res)) as unknown as AssessmentSession;
-    expect(mockAssessmentEngine.getActiveSession(STUDENT_A)?.id).toBe(created.id);
-    expect(mockAssessmentEngine.getActiveSession(STUDENT_B)).toBeNull();
+    expect((await mockAssessmentEngine.getActiveSession(STUDENT_A))?.id).toBe(created.id);
+    expect(await mockAssessmentEngine.getActiveSession(STUDENT_B)).toBeNull();
   });
 
   it("rejects a malformed profile with 400 instead of reaching the generator", async () => {
@@ -285,7 +285,7 @@ describe("assessment session ownership over HTTP (§43.6)", () => {
 
     // A's session is untouched.
     signInAs(TOKEN_A);
-    expect(mockAssessmentEngine.getSession(created.id, STUDENT_A).progress.questionsAnswered).toBe(0);
+    expect((await mockAssessmentEngine.getSession(created.id, STUDENT_A)).progress.questionsAnswered).toBe(0);
   });
 
   it("scopes /sessions/active and /results/latest to the caller", async () => {
@@ -315,7 +315,7 @@ describe("server-authoritative grading over HTTP (§43.5)", () => {
     const question = created.currentQuestion!;
 
     const gradeWith = async (extra: Record<string, unknown>, submissionId: string) => {
-      mockAssessmentEngine.__reset();
+      await mockAssessmentEngine.__reset();
       __clearRateBuckets();
       const fresh = (await body(
         await call(

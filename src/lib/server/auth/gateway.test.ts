@@ -9,12 +9,11 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { prisma as db } from "@/lib/server/db";
 import { AuthGatewayError, createGateway } from "./gateway";
 import { hashPassword } from "./password";
 import { __clearRateBuckets } from "./rate-limit";
 
-const db = new PrismaClient();
 const gateway = createGateway(db);
 
 let adminId = "";
@@ -46,8 +45,9 @@ const baseRegister = {
 };
 
 beforeAll(async () => {
-  // Prisma singleton safety: tests must fail loudly if pointed at dev.db.
-  expect(process.env.DATABASE_URL).toContain("test.db");
+  // Safety: this suite DELETES every row it touches, so it must never be
+  // pointed at the development database.
+  expect(process.env.DATABASE_URL ?? "").toContain("mureeh_test");
 });
 
 beforeEach(async () => {

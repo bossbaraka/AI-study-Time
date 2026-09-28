@@ -79,21 +79,21 @@ function renderFlow() {
 }
 
 async function lockGoal(input: GoalDiscoveryInput = jsInput()): Promise<string> {
-  const created = mockGoalEngine.createGoal(input, {
+  const created = await mockGoalEngine.createGoal(input, {
     studentId,
     idempotencyKey: `seed-${Math.random()}`,
     diagnosisContext: null,
   });
-  const locked = mockGoalEngine.lockGoal(created.goal.id, studentId, `seed-lock-${Math.random()}`);
+  const locked = await mockGoalEngine.lockGoal(created.goal.id, studentId, `seed-lock-${Math.random()}`);
   return locked.id;
 }
 
 beforeEach(async () => {
   window.localStorage.removeItem("mureeh.locale");
   vi.clearAllMocks();
-  mockExecutionEngine.__reset();
-  mockRoadmapEngine.__reset();
-  mockGoalEngine.__reset();
+  await mockExecutionEngine.__reset();
+  await mockRoadmapEngine.__reset();
+  await mockGoalEngine.__reset();
   const { session } = await authService.login({ email: STUDENT_EMAIL, password: PASSWORD });
   studentId = session.user.id;
 });
@@ -105,7 +105,7 @@ describe("/roadmap — routing contract (§21)", () => {
   });
 
   it("redirects to /goals when the goal is not locked", async () => {
-    mockGoalEngine.createGoal(
+    await mockGoalEngine.createGoal(
       jsInput({ desiredOutcome: "I want to learn more about JavaScript overall" }),
       { studentId, idempotencyKey: "seed-unlocked", diagnosisContext: null },
     );
@@ -116,7 +116,7 @@ describe("/roadmap — routing contract (§21)", () => {
   it("never generates a roadmap without a locked goal", async () => {
     renderFlow();
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/goals"));
-    expect(mockRoadmapEngine.getActiveRoadmap(studentId)).toBeNull();
+    expect(await mockRoadmapEngine.getActiveRoadmap(studentId)).toBeNull();
   });
 });
 
@@ -131,7 +131,7 @@ describe("/roadmap — generation screen (§19/§22)", () => {
     expect(screen.getByText(OUTCOME)).toBeDefined();
     expect(screen.getByRole("button", { name: /Generate my roadmap/i })).toBeDefined();
     // Nothing is generated until the student asks.
-    expect(mockRoadmapEngine.getActiveRoadmap(studentId)).toBeNull();
+    expect(await mockRoadmapEngine.getActiveRoadmap(studentId)).toBeNull();
   });
 
   it("generates the roadmap and reveals milestones with one current", async () => {
@@ -154,7 +154,7 @@ describe("/roadmap — generation screen (§19/§22)", () => {
     expect(screen.getByText(/You're ready when/i)).toBeDefined();
     expect(screen.getByText(/You are here:/i)).toBeDefined();
     // Persisted for Phase 7 and refreshes.
-    expect(mockRoadmapEngine.getActiveRoadmap(studentId)?.status).toBe("active");
+    expect((await mockRoadmapEngine.getActiveRoadmap(studentId))?.status).toBe("active");
   });
 
   it("recovers from a failed generation with a retry — no dead end", async () => {
@@ -202,7 +202,7 @@ describe("/roadmap — generation screen (§19/§22)", () => {
 describe("/roadmap — roadmap view (§22/§23/§24)", () => {
   it("restores the roadmap on a fresh mount (simulated refresh)", async () => {
     const goalId = await lockGoal();
-    mockRoadmapEngine.generateRoadmap(goalId, studentId);
+    await mockRoadmapEngine.generateRoadmap(goalId, studentId);
     renderFlow();
 
     expect(await screen.findByText(/Your JavaScript path/i)).toBeDefined();
@@ -214,7 +214,7 @@ describe("/roadmap — roadmap view (§22/§23/§24)", () => {
 
   it("expands an upcoming milestone on click (aria-expanded semantics)", async () => {
     const goalId = await lockGoal();
-    mockRoadmapEngine.generateRoadmap(goalId, studentId);
+    await mockRoadmapEngine.generateRoadmap(goalId, studentId);
     const user = userEvent.setup();
     renderFlow();
     await screen.findByText(/Your JavaScript path/i);
@@ -234,7 +234,7 @@ describe("/roadmap — roadmap view (§22/§23/§24)", () => {
 
   it("labels unit types and shows effort honestly", async () => {
     const goalId = await lockGoal();
-    mockRoadmapEngine.generateRoadmap(goalId, studentId);
+    await mockRoadmapEngine.generateRoadmap(goalId, studentId);
     renderFlow();
     await screen.findByText(/Your JavaScript path/i);
 
@@ -249,7 +249,7 @@ describe("/roadmap — roadmap view (§22/§23/§24)", () => {
 
   it("links the real execution entry — the Stage-6 placeholder is gone (Phase 7)", async () => {
     const goalId = await lockGoal();
-    const { roadmap } = mockRoadmapEngine.generateRoadmap(goalId, studentId);
+    const { roadmap } = await mockRoadmapEngine.generateRoadmap(goalId, studentId);
     renderFlow();
     await screen.findByText(/Your JavaScript path/i);
 
@@ -269,11 +269,11 @@ describe("/roadmap — roadmap view (§22/§23/§24)", () => {
 
   it("overlays honest execution runtime states on the timeline (§14)", async () => {
     const goalId = await lockGoal();
-    const { roadmap } = mockRoadmapEngine.generateRoadmap(goalId, studentId);
+    const { roadmap } = await mockRoadmapEngine.generateRoadmap(goalId, studentId);
     const firstUnit = [...roadmap.milestones]
       .sort((a, b) => a.order - b.order)[0]!
       .learningUnits.sort((a, b) => a.order - b.order)[0]!;
-    mockExecutionEngine.startLearningUnit(firstUnit.id, studentId);
+    await mockExecutionEngine.startLearningUnit(firstUnit.id, studentId);
 
     renderFlow();
     await screen.findByText(/Your JavaScript path/i);
@@ -282,7 +282,7 @@ describe("/roadmap — roadmap view (§22/§23/§24)", () => {
     expect(await screen.findByText("In progress", { selector: "span" })).toBeDefined();
     expect(screen.getByRole("link", { name: /Resume this unit/i })).toBeDefined();
     // The curriculum was never mutated by execution.
-    expect(mockRoadmapEngine.getActiveRoadmap(studentId)?.milestones[0]?.status).toBe(
+    expect((await mockRoadmapEngine.getActiveRoadmap(studentId))?.milestones[0]?.status).toBe(
       "in_progress",
     );
   });
@@ -292,7 +292,7 @@ describe("/roadmap — Arabic + RTL (§30)", () => {
   it("renders localized labels with dir=rtl (engine content stays English)", async () => {
     window.localStorage.setItem("mureeh.locale", "ar");
     const goalId = await lockGoal();
-    mockRoadmapEngine.generateRoadmap(goalId, studentId);
+    await mockRoadmapEngine.generateRoadmap(goalId, studentId);
     renderFlow();
 
     expect((await screen.findAllByText(/المحطات/)).length).toBeGreaterThan(0);

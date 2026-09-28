@@ -1,0 +1,1 @@
+/home/user/AI-study-Time/node_modules/@embedded-postgres/linux-x64/native/bin/postgres "-D" "/home/user/AI-study-Time/.pgdata/data" "-p" "55432"
