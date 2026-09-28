@@ -14,16 +14,18 @@ Browser service → same-origin HTTP → route → cookie/session identity
 
 The 17 new handlers are covered by route integration tests against PostgreSQL; an additional runtime-flow test begins at the production client service, dispatches `fetch` to the actual route handlers, and checks the rows in PostgreSQL. The browser-side transport branches are selected outside Vitest, not by a per-request fallback.
 
+Phase 3 auth now has real invitation-bound email verification: accounts remain unverified until a hashed, expiring, single-use token is consumed; login and session resolution reject unverified accounts. SMTP delivery is attempted from the persisted outbox, delivery status is visible to admins, and production outbox bodies redact tokens and invitation codes. SMTP and the public app origin must be configured in the deployment environment.
+
 Two findings prevent a PASS claim:
 
-1. **Two existing email routes are compatibility stubs.** `POST /api/auth/verify-email` validates the current token shape but cannot verify a token; `POST /api/auth/resend-verification` validates the email but does not enqueue or send mail. They remain `PARTIAL`, not `REAL`. Registration currently pre-verifies invitation accounts; implementing actual email delivery/verification needs its provider and product contract.
-2. **Several Phase 4/5 product services have no domain API yet.** Their mock transport now fails explicitly with `501 feature_deferred` outside Vitest unless `NEXT_PUBLIC_DEMO_DATA=true` in a non-production runtime. The production demo flag is ignored, so missing persistence can no longer look like real student data.
+1. **The module-testing feature is still not server-authoritative.** The browser computes correctness and the feature has no persisted domain/API. This P0 remains deferred pending approved per-question rubrics for AI grading.
+2. **Several Phase 4/5 product services have no domain API yet.** Their mock transport fails explicitly with `501 feature_deferred` outside Vitest unless `NEXT_PUBLIC_DEMO_DATA=true` in a non-production runtime. The production demo flag is ignored, so missing persistence cannot look like real student data. Vercel preview deployment also currently fails; its protected build logs could not be inspected without the project integration.
 
-**Final status: `PHASE 3 — PARTIAL`.** The real Goal/Roadmap/Execution data paths are implemented and verified. Deferred features and the two partial auth contracts are recorded below instead of being represented by fake behavior.
+**Final status: `PHASE 3 — PARTIAL`.** Goal/Roadmap/Execution and auth token-verification paths are implemented and verified. Deferred learning features and the inaccessible external deployment failure are disclosed rather than hidden.
 
 ## 2. Endpoint Inventory
 
-The inventory was regenerated from the filesystem and exported method declarations, not copied from the Phase 1 counts: **43 route files / 45 HTTP handlers**. There are **43 REAL, 2 PARTIAL, 0 mock-backed and 0 duplicate handlers**. Seventeen handlers were added for Goal (7), Roadmap (5) and Execution (5). See the full per-handler table—including auth, owner, validation, service/domain/repository, contract, and test coverage—in [`docs/ENDPOINT_INVENTORY.md`](./ENDPOINT_INVENTORY.md).
+The inventory was regenerated from the filesystem and exported method declarations, not copied from the Phase 1 counts: **43 route files / 45 HTTP handlers**. There are **45 REAL, 0 PARTIAL, 0 mock-backed and 0 duplicate handlers**. Seventeen handlers were added for Goal (7), Roadmap (5) and Execution (5); the two existing auth email operations now reach persisted token state and SMTP/outbox delivery. See the full per-handler table—including auth, owner, validation, service/domain/repository, contract, and test coverage—in [`docs/ENDPOINT_INVENTORY.md`](./ENDPOINT_INVENTORY.md).
 
 | Area | Handlers | REAL | PARTIAL | Missing current Phase 3 engine routes |
 |---|---:|---:|---:|---:|
@@ -31,10 +33,10 @@ The inventory was regenerated from the filesystem and exported method declaratio
 | Goal | 7 | 7 | 0 | 0 |
 | Roadmap | 5 | 5 | 0 | 0 |
 | Execution | 5 | 5 | 0 | 0 |
-| Auth | 8 | 6 | 2 | 0 |
+| Auth | 8 | 8 | 0 | 0 |
 | Admin | 10 | 10 | 0 | 0 |
 | Health | 1 | 1 (liveness only) | 0 | 0 |
-| **Total** | **45** | **43** | **2** | **0** |
+| **Total** | **45** | **45** | **0** | **0** |
 
 `POST /api/assessment/generate` is still intentionally removed (DEAD): it disclosed answer keys. No duplicate route/method definitions were found. The new HTTP handlers contain no Prisma imports or Prisma delegate calls.
 
@@ -159,13 +161,13 @@ Admin lists use bounded takes: users 200, invitations 200, audit 100, outbox 30,
 | `src/lib/server/domain-errors.ts`, `src/lib/server/auth/request.ts` | Shared domain-to-HTTP mapping and request-correlated error funnel | Preserve stable domain codes; prevent SQL/Prisma messages from reaching callers/logs. |
 | `src/services/engines.server.ts` | Canonical names for Prisma-backed production engines | Make a mock-to-production wiring mistake visible in review/static scans. |
 | `src/lib/api/client.ts`, `src/services/{goal-discovery,roadmap,execution,journey}.service.ts` | Real HTTP transport outside Vitest; mock transport now explicit demo/test only | No production fallback to demo rows. |
-| `src/services/auth.service.ts`, `src/lib/server/auth/gateway.ts`, auth routes | PostgreSQL wording, password recovery/reset rate limits, correlated failure contexts, email stub input validation | Close unauthenticated recovery abuse and keep public error behavior observable. |
+| `src/services/auth.service.ts`, `src/lib/server/auth/gateway.ts`, auth routes, `src/lib/server/auth/mailer.ts` | Invitation registration now requires email verification; hashed, expiring one-use tokens; SMTP/outbox delivery state and safe token redaction | Keep auth identity server-authoritative, resend enumeration-resistant, and SMTP failures observable without leaking provider details. |
 | `src/app/api/{admin,auth,assessment,goals,roadmaps,executions}/**/*routes.test.ts`, `src/app/api/production-flow.test.ts`, `src/lib/api/client.test.ts`, `src/test/route-harness.ts` | Real-handler security and persistence tests | Prove auth, ownership, validation, domain errors, PostgreSQL and runtime transport. |
 | `src/schemas/auth.ts`, `src/app/api/admin/invitations/route.ts`, admin mutation handlers | Bound password/id inputs and accept the existing empty-optional national-id form; let `withAdmin` own the single correlated error funnel | Fix verified form/API mismatch; avoid unbounded external inputs and preserve requestId context. |
-| `.env.example` | Document `NEXT_PUBLIC_DEMO_DATA=false` | Make local demo behavior explicit and production-disabled. |
+| `.env.example` | Document explicit demo opt-in plus `SMTP_*` transport and public app-origin settings | Keep demo data disabled in production and SMTP credentials server-only. |
 | `docs/ENDPOINT_INVENTORY.md`, `docs/PHASE_3_REPORT.md` | Filesystem-verified endpoint inventory and this report | Record actual contracts, status, risks and deferred work. |
 
-No Prisma schema or migration changed in Phase 3. No destructive migration, framework change, database replacement or history rewrite occurred.
+Phase 3 adds one additive PostgreSQL migration for one-use email verification tokens and SMTP delivery state. No destructive migration, framework change, database replacement or history rewrite occurred.
 
 ## 8. Tests and Build
 
@@ -173,23 +175,24 @@ No Prisma schema or migration changed in Phase 3. No destructive migration, fram
 |---|---:|---|
 | `npx eslint src` | 0 errors, 0 warnings | VERIFIED |
 | `npx tsc --noEmit` | 0 errors | VERIFIED |
-| `npx vitest run` | **562 passed / 0 failed, 42 files** | VERIFIED |
+| `npm test` | **570 passed / 0 failed, 43 files** | VERIFIED |
 | Repository integration | **31** = 20 shared adapter-contract + 11 PostgreSQL reality | VERIFIED |
-| HTTP integration | **90** across assessment 18, admin 23, auth 7, goals 19, roadmaps 12, executions 10, full production-flow 1 | VERIFIED |
-| Auth gateway tests | **18** (real PostgreSQL gateway suite) | VERIFIED |
-| Other unit/component tests | **423** | VERIFIED |
-| `npx prisma validate` | valid schema | VERIFIED |
-| Clean migrations | Phase 2 verified 2 migrations / 15 tables; no Phase 3 schema change | VERIFIED (carried forward) |
-| `npx next build` with `DATABASE_URL`, `DIRECT_URL`, `NEXT_FONT_GOOGLE_MOCKED_RESPONSES` | succeeds; 43 API paths emitted | VERIFIED with official font-fetch mock |
+| HTTP integration | **91** across assessment 18, admin 23, auth 7, goals 19, roadmaps 12, executions 10, full production-flow 1, auth registration→verification→login 1 | VERIFIED |
+| Auth gateway tests | **21** domain tests (real PostgreSQL; the HTTP registration flow is counted above) | VERIFIED |
+| Other unit/component tests | **427** | VERIFIED |
+| Prisma schema validation using Prisma's JS schema engine (temporary local config) | valid schema | VERIFIED |
+| PostgreSQL migrations | Three additive migrations / 16 tables; Phase 3 adds hashed email-verification tokens and SMTP delivery state, with no destructive changes | VERIFIED against local PostgreSQL |
+| `npx next build` with local PostgreSQL and `NEXT_FONT_GOOGLE_MOCKED_RESPONSES` fixture | succeeds; 43 API paths emitted | VERIFIED via Next's official font-mock hook; live Google Fonts remains blocked |
 | Build against live `fonts.googleapis.com` from this sandbox | network egress unavailable | BLOCKED |
+| Vercel preview for PR #1 | deployment status `failure`; protected logs require Vercel project authorization | BLOCKED pending Vercel reconnect/log inspection |
 
-The Vitest groups sum exactly: `90 + 31 + 18 + 423 = 562`. The route suites use real PostgreSQL; only session resolution is faked in protected-route suites. Auth public routes use the actual gateway. No `.skip()`, `.only()`, expected failure, or disabled assertion was introduced.
+The test groups sum exactly: `91 HTTP + 31 repository contract/reality + 21 auth gateway-domain + 427 other unit/component = 570`. The route suites use real PostgreSQL; only session resolution is faked in protected-route suites. Auth routes and the gateway suite exercise registration → verification → login over actual HTTP handlers. SMTP transport tests stub only the external mail transport; token storage, rate limits, and auth persistence remain real. No `.skip()`, `.only()`, expected failure, or disabled assertion was introduced.
 
 ## 9. Security Findings
 
 ### P0 — open, deferred to Phase 4
 
-The module-testing UI still computes correctness in the browser (`src/features/quizzes/components/test-runner.tsx`, `src/types/domain.ts` `TestResultAnswer.correct`). There is no settled server-side testing engine, port or endpoint. Per the dependency rule this was **not** papered over with a fake route. It remains a P0 product/security defect and must be made server-authoritative before the testing feature is promoted as a trusted score.
+The module-testing UI still computes correctness in the browser (`src/features/quizzes/components/test-runner.tsx`, `src/types/domain.ts` `TestResultAnswer.correct`). There is no settled server-side test domain, port, persisted question bank, or endpoint. The user approved AI-assisted grading but selected a rubric per question; those rubrics are not yet supplied. This P0 remains open until the rubric is defined and grading is moved server-side. No placeholder route or client-derived score was promoted as authoritative.
 
 ### P1 — production hardening
 
@@ -198,7 +201,7 @@ The module-testing UI still computes correctness in the browser (`src/features/q
 
 ### P2 — partial/deferred behavior
 
-- Auth verify/resend endpoints validate inputs but are still static compatibility acknowledgements; no token verification or mail enqueue/delivery occurs. Do not claim those operations are complete.
+- Live SMTP delivery has not been exercised in this environment. Production must set `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, and `NEXT_PUBLIC_APP_URL`; the admin outbox records safe delivery state and production-retained message bodies redact one-time credentials.
 - Legacy learning, mastery, tests, recall, recovery, behavior, mentor and engagement contracts have no real domain API and now fail explicitly instead of displaying mock data as persisted data.
 - Unmocked Next Google Fonts build remains blocked by this environment's network; `layout.tsx` was not modified to hide it.
 - Fixed-size admin reads are bounded but do not expose cursors; no current consumer asks for cursor pagination.
@@ -211,7 +214,7 @@ The module-testing UI still computes correctness in the browser (`src/features/q
 ## 10. Deferred Work
 
 - **Phase 4:** server-authoritative test runner and grading; mastery derivation/evidence; recall scheduler; recovery state machine; behavior model; any new learning entities/endpoints. Preserve existing product semantics until the domain rules are reviewed.
-- **Phase 5:** AI provider abstraction, prompt/input hardening, schema-validated generation, timeout/retry/token budgets; real outbox email delivery contract/provider.
+- **Phase 5:** AI provider abstraction, prompt/input hardening, schema-validated generation, timeout/retry/token budgets. SMTP transport exists for auth mail; deployment delivery still requires valid configuration and a live send check.
 - **Phase 6:** broader security review/hardening, deployment-specific cookie/CSRF/proxy assumptions, multi-instance rate-limiter deployment decision.
 - **Phase 7:** browser E2E (the repository still has no Playwright/E2E suite). Route-handler integration is not a substitute for a browser run.
 - **Phase 8:** CI and production observability pipeline; no CI workflow is added ahead of the fixed phase order.

@@ -50,6 +50,9 @@ export interface AdminOutboxRow {
   subject: string;
   body: string;
   kind: string;
+  deliveryStatus: "pending" | "sent" | "failed";
+  deliveryAttempts: number;
+  deliveredAt: string | null;
   createdAt: string;
 }
 

@@ -33,7 +33,7 @@ model User {
   role              String // student | guardian | admin
   nationalId        String?   @unique
   status            String    @default("pending") // pending | active | suspended
-  emailVerification String    @default("verified") // invitation flow pre-verifies
+  emailVerification String    @default("verified") // invitation registration explicitly starts pending
   onboarding        String    @default("not-started") // drives post-auth routing
   failedAttempts    Int       @default(0)
   lockedUntil       DateTime?
@@ -53,6 +53,7 @@ model User {
   unitExecutions     LearningUnitExecution[]
   auditAsSubject    AuditEvent[]  @relation("Subject")
   resetTokens       PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
 }
 
 /// Server-side sessions. Only the SHA-256 of the cookie token is
@@ -102,6 +103,20 @@ model PasswordResetToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
+/// Single-use email verification token. Only the SHA-256 hash is persisted.
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
 /// Append-only audit trail for every security-relevant action.
 model AuditEvent {
   id        String   @id @default(cuid())
@@ -119,16 +134,20 @@ model AuditEvent {
   @@index([createdAt])
 }
 
-/// Internal dev outbox — stands in for the future email gateway.
-/// Links (verification/reset) are delivered here in this environment;
-/// the seam is the writer: swap the insert for a real mail transport.
+/// Auth email delivery history. Production sends via SMTP and tracks each
+/// attempt; development/tests keep a local outbox. Production message bodies
+/// redact one-time tokens and invitation codes.
 model OutboxMessage {
-  id        String   @id @default(cuid())
-  to        String
-  subject   String
-  body      String
-  kind      String // invite | reset | welcome
-  createdAt DateTime @default(now())
+  id                String    @id @default(cuid())
+  to                String
+  subject           String
+  body              String
+  kind              String // invite | reset | welcome | verification
+  deliveryStatus    String    @default("pending") // pending | sent | failed
+  deliveryAttempts  Int       @default(0)
+  deliveredAt       DateTime?
+  lastDeliveryError String? // safe category only; never provider text
+  createdAt         DateTime  @default(now())
 
   @@index([createdAt])
 }

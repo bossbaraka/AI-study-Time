@@ -1,20 +1,33 @@
 import { NextResponse } from "next/server";
-import { csrfRejected, forbiddenResponse, invalidRequestResponse } from "@/lib/server/auth/request";
-import { forgotPasswordSchema } from "@/schemas/auth";
+import { resendVerificationSchema } from "@/schemas/auth";
+import {
+  csrfRejected,
+  errorResponse,
+  failureContext,
+  forbiddenResponse,
+  gateway,
+  invalidRequestResponse,
+  requestMeta,
+} from "@/lib/server/auth/request";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Compatibility seam only: the current gateway pre-verifies invitation
- * accounts and has no email-delivery operation. Validate the caller's
- * existing `{email}` contract, but classify the static acknowledgement as
- * PARTIAL until real outbox/provider delivery is specified and implemented.
+ * POST /api/auth/resend-verification — rate-limited and enumeration-resistant.
+ * The gateway only issues a token for an existing, unverified account; every
+ * address receives the same acknowledgement.
  */
 export async function POST(req: Request): Promise<NextResponse> {
+  const failure = failureContext(req, "auth");
   if (csrfRejected(req)) return forbiddenResponse();
-  const parsed = forgotPasswordSchema.safeParse(await req.json().catch(() => null));
+  const parsed = resendVerificationSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return invalidRequestResponse();
-  void parsed.data.email;
-  return NextResponse.json({ status: "sent" });
+
+  try {
+    const result = await gateway.resendVerification(parsed.data.email, requestMeta(req));
+    return NextResponse.json(result);
+  } catch (error) {
+    return await errorResponse(error, failure);
+  }
 }

@@ -67,6 +67,17 @@ export default function AdminOutboxPage() {
                 <Badge tone={message.kind === "reset" ? "warning" : "info"}>
                   {t(`admin.outbox.kind.${message.kind}`)}
                 </Badge>
+                <Badge
+                  tone={
+                    message.deliveryStatus === "sent"
+                      ? "success"
+                      : message.deliveryStatus === "failed"
+                        ? "danger"
+                        : "warning"
+                  }
+                >
+                  {t(`admin.outbox.deliveryStatus.${message.deliveryStatus}`)}
+                </Badge>
                 <p className="ms-auto text-xs text-muted-foreground" dir="ltr">
                   {message.to} · {format(message.createdAt)}
                 </p>

@@ -3,7 +3,7 @@
 Inventory rebuilt from **every `route.ts` currently on disk** and every exported HTTP method, then cross-checked against service imports and route-handler bodies. This replaces the Phase 1 snapshot below; its missing counts are historical, not current.
 
 - **43 route files, 45 HTTP handlers** (one `/api/goals/:goalId` file exports both GET and PATCH).
-- **43 REAL, 2 PARTIAL, 0 mock-backed route handlers, 0 duplicate handlers.**
+- **45 REAL, 0 PARTIAL, 0 mock-backed route handlers, 0 duplicate handlers.**
 - **17 handlers added in Phase 3:** 7 goal, 5 roadmap, 5 execution.
 - **One removed route remains DEAD:** `POST /api/assessment/generate`; it was removed because it exposed answer keys. No consumer calls it.
 - The filesystem contains no goal/roadmap/execution route duplicated at another path.
@@ -72,20 +72,20 @@ Each unit id is resolved inside the caller's active roadmap. No request accepts 
 
 A non-owner with no active roadmap receives the existing non-leaking `unit_unavailable` response and cannot read or mutate the owner's execution row.
 
-## 5. Auth — 8 handlers: 6 REAL, 2 PARTIAL
+## 5. Auth — 8 handlers: 8 REAL
 
 | Endpoint | Auth / owner | Validation | Service / domain / persistence | Contract / tests | Status |
 |---|---|---|---|---|---|
-| `POST /api/auth/login` | public | login schema | auth gateway → Prisma/PostgreSQL; session cookie | session creation + account lock/rate rules; gateway tests, route HTTP not separately exercised | REAL |
-| `POST /api/auth/register` | public | register schema | auth gateway → Prisma/PostgreSQL; invitation consumed, user + outbox/audit | invitation-only registration; gateway tests | REAL |
+| `POST /api/auth/login` | public | login schema | auth gateway → Prisma/PostgreSQL; session cookie | session creation + account lock/rate rules; gateway tests and HTTP flow after verification | REAL |
+| `POST /api/auth/register` | public | register schema | auth gateway → invitation + user(emailVerification=pending) + hashed token + SMTP/outbox + audit | invitation-only, no auto-login; registration→verification→login HTTP test | REAL |
 | `POST /api/auth/logout` | cookie optional | no body contract | auth gateway → Prisma/PostgreSQL | revokes session and clears cookie; gateway tests | REAL |
 | `GET /api/auth/session` | cookie optional | none | auth gateway → Prisma/PostgreSQL | current session state or unauthenticated; gateway tests | REAL |
-| `POST /api/auth/forgot-password` | public | forgot schema | auth gateway → reset token/outbox/audit in PostgreSQL | enumeration-resistant response; email delivery remains outbox/provider dependent; gateway tests | REAL |
+| `POST /api/auth/forgot-password` | public | forgot schema | auth gateway → reset token + SMTP/outbox + audit in PostgreSQL | enumeration-resistant response; safe SMTP state recorded in outbox; gateway tests | REAL |
 | `POST /api/auth/reset-password` | public | reset schema | auth gateway → transaction: user update, token used, sessions revoked | token error codes preserved; gateway tests | REAL |
-| `POST /api/auth/verify-email` | public | `{token}` required, trimmed, 1–512 chars (`verifyEmailSchema`) | static route response; gateway is invitation-preverified and has no token verification operation | always returns `already-verified`; no mutation | PARTIAL |
-| `POST /api/auth/resend-verification` | public | email validated with `forgotPasswordSchema` | static route response; gateway has no delivery operation | always returns `sent`; no mutation | PARTIAL |
+| `POST /api/auth/verify-email` | public | `{token}` required, trimmed, 1–512 chars (`verifyEmailSchema`) | hash lookup → expiry/one-use check → transactional user verification in PostgreSQL | returns `verified`, `already-verified`, `expired`, or `invalid`; gateway + HTTP flow tests | REAL |
+| `POST /api/auth/resend-verification` | public | email validated with `resendVerificationSchema`; per-email and per-IP rate limit | enumeration-resistant lookup → old-token invalidation → new hashed token + SMTP/outbox | identical acknowledgement for unknown/verified/pending accounts; gateway tests | REAL |
 
-The two partial auth routes are not called REAL merely because the gateway pre-verifies invitation users. Their static responses do not verify a token or enqueue a message. Implementing actual email verification/delivery needs a defined product/provider contract (Phase 5/6); no behavior was invented here.
+Invitation registration now leaves `emailVerification=pending`; login and session resolution reject unverified users. Only SHA-256 token hashes are stored in the verification table. Production outbox bodies redact verification/reset tokens and invitation codes; SMTP delivery state records `pending`, `sent`, or `failed` with a safe error category. Configure `SMTP_*` and `NEXT_PUBLIC_APP_URL` in the deployment environment; local tests use the inspectable outbox and never contact SMTP.
 
 ## 6. Admin — 10 handlers, REAL
 
@@ -135,7 +135,6 @@ These service families still describe mock/demo behavior and have no settled Pha
 | `learning`: resources, recall schedule, tests/results, mastery | no Phase 3 persistence/domain endpoints; client-side test grading remains | DEFERRED_TO_PHASE_4; do not promote test grading until server-authoritative |
 | `intelligence`: behavior, recovery, mentor | no stable engine ports/API | DEFERRED_TO_PHASE_4/5 |
 | `engagement`: achievements, certificates, notifications, plans, guardian | no stable persisted entities/contracts | DEFERRED_TO_PHASE_4/6 |
-| auth email verify/resend | no token/delivery operation in gateway | PARTIAL; provider/contract decision deferred to Phase 5/6 |
 
 ## 10. Production data-flow audit
 
@@ -148,8 +147,8 @@ Verified after implementation:
 - `.next/static` scan finds no `DATABASE_URL`, `PrismaClient`, or local test credentials.
 - Remaining `mockRequest`/`mock-db`/localStorage service paths are Vitest-only or explicit non-production demo; production mock calls fail before the resolver runs. `localStorage` in the locale provider and auth mock remains browser/dev/test infrastructure, not a learning persistence source.
 - Query bounds: admin collections have explicit `take` limits (200/200/100/30); assessment history returns only latest/active or one bounded session; roadmap/execution results are the student's generated bounded plan, not an unbounded history listing. No cursor API was added without an existing consumer contract.
-- Rate limit: in-memory sliding window, protecting login, registration, and assessment generation. Account lockout is DB-backed. Limiter is single-process only; multi-instance shared limiting is **PRODUCTION HARDENING**, not a reason to add Redis in this phase. IP buckets consume `x-forwarded-for`, so the deployment proxy must overwrite/sanitize it; do not trust a client-supplied forwarded header at the public edge.
+- Rate limit: in-memory sliding window, protecting login, registration, email verification/resend, and assessment generation. Account lockout is DB-backed. Limiter is single-process only; multi-instance shared limiting is **PRODUCTION HARDENING**, not a reason to add Redis in this phase. IP buckets consume `x-forwarded-for`, so the deployment proxy must overwrite/sanitize it; do not trust a client-supplied forwarded header at the public edge.
 
 ## 11. Current status snapshot
 
-Phase 3 added all 17 missing routes for Goal/Roadmap/Execution and connected their browser services to HTTP. Real PostgreSQL route tests prove the persisted paths. The two auth email endpoints and mock-only service families are honestly classified as PARTIAL/DEFERRED rather than presented as production data.
+Phase 3 added all 17 Goal/Roadmap/Execution handlers and replaced the auth email acknowledgements with persisted one-use verification and SMTP/outbox operations. PostgreSQL-backed HTTP tests cover invitation registration → token verification → login. The remaining mock-only service families are explicitly deferred, not presented as production data.

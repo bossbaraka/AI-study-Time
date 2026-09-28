@@ -10,6 +10,9 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { prisma as db } from "@/lib/server/db";
+import { POST as loginRoute } from "@/app/api/auth/login/route";
+import { POST as registerRoute } from "@/app/api/auth/register/route";
+import { POST as verifyEmailRoute } from "@/app/api/auth/verify-email/route";
 import { AuthGatewayError, createGateway } from "./gateway";
 import { hashPassword } from "./password";
 import { __clearRateBuckets } from "./rate-limit";
@@ -37,6 +40,31 @@ async function invite(email: string, extra: { nationalId?: string } = {}) {
     nationalId: extra.nationalId,
   });
   return result.code;
+}
+
+async function latestVerificationToken(email: string): Promise<string> {
+  const message = await db.outboxMessage.findFirst({
+    where: { kind: "verification", to: email },
+    orderBy: { createdAt: "desc" },
+  });
+  const match = message ? /token=([^ ]+)/.exec(message.body) : null;
+  if (!match?.[1]) throw new Error("verification token missing from test outbox");
+  return match[1];
+}
+
+async function registerAndVerify(input: {
+  name: string;
+  email: string;
+  password: string;
+  inviteCode: string;
+  nationalId?: string;
+}): Promise<void> {
+  await gateway.register(input, {});
+  const token = await latestVerificationToken(input.email);
+  const result = await gateway.verifyEmail(token);
+  if (result.status !== "verified" && result.status !== "already-verified") {
+    throw new Error(`verification failed: ${result.status}`);
+  }
 }
 
 const baseRegister = {
@@ -71,23 +99,71 @@ beforeEach(async () => {
 });
 
 describe("registration (invitation-gated)", () => {
-  it("activates an account only with a valid invitation and records the trail", async () => {
+  it("keeps an invited account unverified until its single-use token is consumed", async () => {
     const code = await invite("sara@example.com");
     const result = await gateway.register(
       { ...baseRegister, email: "sara@example.com", inviteCode: code },
       { ip: "10.0.0.1", userAgent: "vitest" },
     );
-    expect(result).toEqual({ status: "active", email: "sara@example.com" });
+    expect(result).toEqual({ status: "verification-required", email: "sara@example.com" });
 
     const user = await db.user.findUnique({ where: { email: "sara@example.com" } });
     expect(user?.status).toBe("active");
+    expect(user?.emailVerification).toBe("pending");
     expect(user?.onboarding).toBe("not-started"); // students enter the journey
     const inviteRow = await db.invitation.findFirst({ where: { code } });
     expect(inviteRow?.status).toBe("accepted");
     const audit = await db.auditEvent.findFirst({ where: { type: "register_completed" } });
     expect(audit).toBeTruthy();
-    const outbox = await db.outboxMessage.findFirst({ where: { kind: "welcome" } });
+    const outbox = await db.outboxMessage.findFirst({ where: { kind: "verification" } });
     expect(outbox?.to).toBe("sara@example.com");
+    const token = outbox?.body.match(/token=([^ ]+)/)?.[1];
+    expect(token).toBeTruthy();
+    const stored = await db.emailVerificationToken.findFirstOrThrow({ where: { userId: user!.id } });
+    expect(stored.tokenHash).not.toBe(token);
+    await expect(gateway.login({ email: user!.email, password: baseRegister.password }, {})).rejects.toMatchObject({
+      code: "unverified_email",
+      status: 403,
+    });
+    await expect(gateway.verifyEmail(token!)).resolves.toEqual({ status: "verified" });
+    await expect(gateway.verifyEmail(token!)).resolves.toEqual({ status: "already-verified" });
+    expect((await db.user.findUniqueOrThrow({ where: { id: user!.id } })).emailVerification).toBe("verified");
+  });
+
+  it("enforces registration, verification, and login through the actual HTTP routes", async () => {
+    const email = `verify-http-${crypto.randomUUID()}@test.local`;
+    const code = await invite(email);
+    const origin = "http://localhost";
+    const httpRequest = (body: unknown) =>
+      new Request(`${origin}/api/auth`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin },
+        body: JSON.stringify(body),
+      });
+
+    const registered = await registerRoute(
+      httpRequest({ name: "HTTP student", email, role: "student", password: "securePass1", inviteCode: code }),
+    );
+    expect(registered.status).toBe(201);
+    expect(await registered.json()).toEqual({ status: "verification-required", email });
+
+    const blockedLogin = await loginRoute(httpRequest({ email, password: "securePass1" }));
+    expect(blockedLogin.status).toBe(403);
+    expect(await blockedLogin.json()).toEqual({ code: "unverified_email" });
+    expect(blockedLogin.headers.get("set-cookie")).toBeNull();
+
+    const message = await db.outboxMessage.findFirstOrThrow({
+      where: { to: email, kind: "verification" },
+    });
+    const token = message.body.match(/token=([^ ]+)/)?.[1];
+    expect(token).toBeTruthy();
+    const verified = await verifyEmailRoute(httpRequest({ token }));
+    expect(verified.status).toBe(200);
+    expect(await verified.json()).toEqual({ status: "verified" });
+
+    const signedIn = await loginRoute(httpRequest({ email, password: "securePass1" }));
+    expect(signedIn.status).toBe(200);
+    expect(signedIn.headers.get("set-cookie")).toContain("mureeh_session=");
   });
 
   it("rejects unknown or revoked codes with invitation_invalid", async () => {
@@ -148,7 +224,7 @@ describe("registration (invitation-gated)", () => {
         { ...baseRegister, email: "nid@example.com", inviteCode: code, nationalId: "1234567890" },
         {},
       ),
-    ).resolves.toMatchObject({ status: "active" });
+    ).resolves.toMatchObject({ status: "verification-required" });
   });
 
   it("refuses a second account on a registered email — even with a fresh invitation", async () => {
@@ -163,13 +239,70 @@ describe("registration (invitation-gated)", () => {
   });
 });
 
+describe("email verification", () => {
+  async function createPendingAccount(email: string): Promise<void> {
+    const code = await invite(email);
+    await gateway.register({ ...baseRegister, email, inviteCode: code }, {});
+  }
+
+  it("rejects expired tokens without verifying the account", async () => {
+    await createPendingAccount("expired-verify@test.local");
+    const rawToken = await latestVerificationToken("expired-verify@test.local");
+    const stored = await db.emailVerificationToken.findFirstOrThrow({
+      where: { user: { email: "expired-verify@test.local" } },
+    });
+    await db.emailVerificationToken.update({
+      where: { id: stored.id },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+
+    await expect(gateway.verifyEmail(rawToken)).resolves.toEqual({ status: "expired" });
+    await expect(
+      db.user.findUniqueOrThrow({ where: { email: "expired-verify@test.local" } }),
+    ).resolves.toMatchObject({ emailVerification: "pending" });
+  });
+
+  it("resends only for pending accounts, invalidates older tokens, and hides account existence", async () => {
+    await createPendingAccount("resend-verify@test.local");
+    const oldToken = await latestVerificationToken("resend-verify@test.local");
+
+    await expect(gateway.resendVerification("resend-verify@test.local", { ip: "resend-ip" }))
+      .resolves.toEqual({ status: "sent" });
+    await expect(gateway.resendVerification("unknown-resend@test.local", { ip: "resend-ip" }))
+      .resolves.toEqual({ status: "sent" });
+
+    const newToken = await latestVerificationToken("resend-verify@test.local");
+    expect(newToken).not.toBe(oldToken);
+    await expect(gateway.verifyEmail(oldToken)).resolves.toEqual({ status: "invalid" });
+    await expect(gateway.verifyEmail(newToken)).resolves.toEqual({ status: "verified" });
+
+    const tokenCount = await db.emailVerificationToken.count({
+      where: { user: { email: "resend-verify@test.local" } },
+    });
+    await expect(gateway.resendVerification("resend-verify@test.local", { ip: "resend-ip" }))
+      .resolves.toEqual({ status: "sent" });
+    await expect(
+      db.emailVerificationToken.count({ where: { user: { email: "resend-verify@test.local" } } }),
+    ).resolves.toBe(tokenCount);
+  });
+
+  it("rate-limits resend requests without revealing account existence", async () => {
+    const meta = { ip: `resend-rate-${crypto.randomUUID()}` };
+    for (let i = 0; i < 5; i += 1) {
+      await expect(gateway.resendVerification("ghost-resend@test.local", meta))
+        .resolves.toEqual({ status: "sent" });
+    }
+    const limited = await expectRejection(
+      gateway.resendVerification("ghost-resend@test.local", meta),
+    );
+    expect(limited.code).toBe("rate_limited");
+  });
+});
+
 describe("login, lockout and sessions", () => {
   async function activeStudent(email = "layla@test.local") {
     const code = await invite(email);
-    await gateway.register(
-      { name: "Layla", email, password: "securePass1", inviteCode: code },
-      {},
-    );
+    await registerAndVerify({ name: "Layla", email, password: "securePass1", inviteCode: code });
     return email;
   }
 
@@ -236,10 +369,7 @@ describe("login, lockout and sessions", () => {
 describe("official lifecycle: suspension revokes live sessions", () => {
   it("suspends, blocks sign-in, kills sessions; restore brings the account back", async () => {
     const code = await invite("life@test.local");
-    await gateway.register(
-      { name: "L", email: "life@test.local", password: "securePass1", inviteCode: code },
-      {},
-    );
+    await registerAndVerify({ name: "L", email: "life@test.local", password: "securePass1", inviteCode: code });
     const user = await db.user.findUniqueOrThrow({ where: { email: "life@test.local" } });
     const { token } = await gateway.login({ email: "life@test.local", password: "securePass1" }, {});
 
@@ -262,10 +392,7 @@ describe("official lifecycle: suspension revokes live sessions", () => {
 
   it("admin unlock clears the lockout clock", async () => {
     const code = await invite("unlocky@test.local");
-    await gateway.register(
-      { name: "U", email: "unlocky@test.local", password: "securePass1", inviteCode: code },
-      {},
-    );
+    await registerAndVerify({ name: "U", email: "unlocky@test.local", password: "securePass1", inviteCode: code });
     const user = await db.user.findUniqueOrThrow({ where: { email: "unlocky@test.local" } });
     for (let i = 0; i < 5; i += 1) {
       await expectRejection(gateway.login({ email: user.email, password: "badbad123" }, {}));
@@ -301,10 +428,7 @@ describe("password recovery", () => {
 
   it("delivers a single-use reset link through the outbox and kills old sessions", async () => {
     const code = await invite("forgot@test.local");
-    await gateway.register(
-      { name: "F", email: "forgot@test.local", password: "securePass1", inviteCode: code },
-      {},
-    );
+    await registerAndVerify({ name: "F", email: "forgot@test.local", password: "securePass1", inviteCode: code });
     const user = await db.user.findUniqueOrThrow({ where: { email: "forgot@test.local" } });
     const { token } = await gateway.login({ email: user.email, password: "securePass1" }, {});
 
@@ -315,7 +439,7 @@ describe("password recovery", () => {
     });
 
     const message = await db.outboxMessage.findFirst({ where: { kind: "reset" } });
-    const match = message ? /token=([^\s]+)/.exec(message.body) : null;
+    const match = message ? /token=([^ ]+)/.exec(message.body) : null;
     if (!match?.[1]) throw new Error("reset token missing from outbox");
 
     await gateway.resetPassword(match[1], "brandNewPass9");

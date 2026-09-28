@@ -25,6 +25,12 @@ import type {
 } from "@/types/admin";
 import { checkRate, resetRate } from "@/lib/server/auth/rate-limit";
 import { hashPassword, TIMING_DEFENDER_HASH, verifyPassword } from "@/lib/server/auth/password";
+import {
+  EmailDeliveryError,
+  isSmtpConfigured,
+  redactSensitiveMailBody,
+  sendEmail,
+} from "@/lib/server/auth/mailer";
 import type {
   AuthErrorCode,
   AuthResponse,
@@ -33,6 +39,7 @@ import type {
   OnboardingState,
   SessionState,
   UserRole,
+  VerifyEmailResult,
 } from "@/types/auth";
 
 /* ------------------------------------------------------------------ */
@@ -61,6 +68,7 @@ export const SESSION_TTL_SEC = 14 * 24 * 60 * 60; // 14 days
 const LOCK_AFTER_FAILURES = 5;
 const LOCK_WINDOW_MS = 15 * 60 * 1000;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+const EMAIL_VERIFICATION_TTL_MS = RESET_TOKEN_TTL_MS;
 const INVITE_DEFAULT_TTL_DAYS = 14;
 /** Unambiguous uppercase alphabet (no I, L, O, U). */
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
@@ -156,10 +164,44 @@ export function createGateway(db: PrismaClient) {
     to: string,
     subject: string,
     body: string,
-    kind: "invite" | "reset" | "welcome",
+    kind: "invite" | "reset" | "welcome" | "verification",
   ): Promise<void> {
-    // The dev outbox stands in for the future email transport.
-    await db.outboxMessage.create({ data: { to, subject, body, kind } });
+    const storedBody =
+      process.env.NODE_ENV === "production" ? redactSensitiveMailBody(body) : body;
+    const message = await db.outboxMessage.create({
+      data: { to, subject, body: storedBody, kind },
+    });
+
+    // Vitest and explicit local development keep the inspectable outbox. The
+    // production runtime attempts SMTP delivery and records only a safe
+    // failure category; provider messages and raw tokens never enter logs.
+    if (process.env.NODE_ENV === "test") return;
+    if (process.env.NODE_ENV !== "production" && !isSmtpConfigured()) return;
+
+    try {
+      await sendEmail({ to, subject, text: body });
+      await db.outboxMessage.update({
+        where: { id: message.id },
+        data: {
+          deliveryStatus: "sent",
+          deliveryAttempts: { increment: 1 },
+          deliveredAt: new Date(),
+          lastDeliveryError: null,
+        },
+      });
+    } catch (error) {
+      const reason =
+        error instanceof EmailDeliveryError ? error.code : "smtp_send_failed";
+      await db.outboxMessage.update({
+        where: { id: message.id },
+        data: {
+          deliveryStatus: "failed",
+          deliveryAttempts: { increment: 1 },
+          lastDeliveryError: reason,
+        },
+      });
+      console.error(JSON.stringify({ event: "email_delivery_failed", kind, reason }));
+    }
   }
 
   return {
@@ -168,7 +210,7 @@ export function createGateway(db: PrismaClient) {
     async register(
       input: GatewayRegisterInput,
       meta: GatewayMeta,
-    ): Promise<{ status: "active"; email: string }> {
+    ): Promise<{ status: "verification-required"; email: string }> {
       const email = input.email.trim().toLowerCase();
       const rate = checkRate(`register:${email}`, 5);
       if (!rate.ok) throw new AuthGatewayError("rate_limited", 429);
@@ -210,7 +252,7 @@ export function createGateway(db: PrismaClient) {
             role: invite.role,
             nationalId,
             status: "active",
-            emailVerification: "verified",
+            emailVerification: "pending",
             onboarding,
           },
         });
@@ -230,14 +272,22 @@ export function createGateway(db: PrismaClient) {
         where: { id: invite.id },
         data: { status: "accepted", acceptedById: user.id },
       });
+      const verificationToken = newToken();
+      await db.emailVerificationToken.create({
+        data: {
+          tokenHash: hashToken(verificationToken),
+          userId: user.id,
+          expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
+        },
+      });
       await notify(
         email,
-        "Your Mureeh account is ready",
-        `Welcome ${user.name}. Your institutional account is active. Sign in at ${appUrl()}/sign-in`,
-        "welcome",
+        "Verify your Mureeh email",
+        `Open this link to verify your email (valid for 1 hour): ${appUrl()}/verify-email?token=${encodeURIComponent(verificationToken)}`,
+        "verification",
       );
       await audit("register_completed", { userId: user.id, ip: meta.ip, userAgent: meta.userAgent });
-      return { status: "active", email };
+      return { status: "verification-required", email };
     },
 
     /* ---------------- login / sessions ----------------------------- */
@@ -284,6 +334,9 @@ export function createGateway(db: PrismaClient) {
 
       if (user.status === "pending") throw new AuthGatewayError("account_pending", 403);
       if (user.status === "suspended") throw new AuthGatewayError("account_suspended", 403);
+      if (user.emailVerification !== "verified") {
+        throw new AuthGatewayError("unverified_email", 403);
+      }
 
       const token = newToken();
       const expiresAt = new Date(Date.now() + SESSION_TTL_SEC * 1000);
@@ -329,8 +382,8 @@ export function createGateway(db: PrismaClient) {
         await db.session.delete({ where: { id: session.id } });
         return { status: "unauthenticated", session: null, expired: true };
       }
-      if (session.user.status !== "active") {
-        // Suspension kills every live session of the account.
+      if (session.user.status !== "active" || session.user.emailVerification !== "verified") {
+        // Suspension or a pending email verification kills every live session.
         await db.session.deleteMany({ where: { userId: session.userId } });
         return unauthenticated;
       }
@@ -425,11 +478,86 @@ export function createGateway(db: PrismaClient) {
       return { status: "reset" };
     },
 
-    /** Gateway mode pre-verifies emails through the invitation; kept for contract parity. */
-    verifyEmail(): { status: "already-verified" } {
-      return { status: "already-verified" };
+    async verifyEmail(
+      rawToken: string,
+      meta: GatewayMeta = {},
+    ): Promise<VerifyEmailResult> {
+      const rate = checkRate(`email-verify:${meta.ip ?? "local"}`, 20);
+      if (!rate.ok) throw new AuthGatewayError("rate_limited", 429);
+
+      const token = await db.emailVerificationToken.findUnique({
+        where: { tokenHash: hashToken(rawToken) },
+        include: { user: true },
+      });
+      if (!token) return { status: "invalid" };
+      if (token.user.emailVerification === "verified") return { status: "already-verified" };
+      if (token.usedAt) return { status: "invalid" };
+      if (token.expiresAt.getTime() <= Date.now()) return { status: "expired" };
+
+      const now = new Date();
+      const result = await db.$transaction(async (tx) => {
+        const claimed = await tx.emailVerificationToken.updateMany({
+          where: { id: token.id, usedAt: null, expiresAt: { gt: now } },
+          data: { usedAt: now },
+        });
+        if (claimed.count !== 1) return "raced" as const;
+
+        const updated = await tx.user.updateMany({
+          where: { id: token.userId, emailVerification: { not: "verified" } },
+          data: { emailVerification: "verified" },
+        });
+        if (updated.count !== 1) return "already-verified" as const;
+
+        await tx.emailVerificationToken.updateMany({
+          where: { userId: token.userId, usedAt: null },
+          data: { usedAt: now },
+        });
+        return "verified" as const;
+      });
+
+      if (result === "verified" || result === "already-verified") return { status: result };
+      const current = await db.user.findUnique({
+        where: { id: token.userId },
+        select: { emailVerification: true },
+      });
+      if (current?.emailVerification === "verified") return { status: "already-verified" };
+      if (token.expiresAt.getTime() <= Date.now()) return { status: "expired" };
+      return { status: "invalid" };
     },
-    resendVerification(): { status: "sent" } {
+
+    async resendVerification(
+      emailRaw: string,
+      meta: GatewayMeta = {},
+    ): Promise<{ status: "sent" }> {
+      const email = emailRaw.trim().toLowerCase();
+      const emailKey = createHash("sha256").update(email).digest("hex");
+      const perEmail = checkRate(`verify-resend:email:${emailKey}`, 5);
+      const perIp = checkRate(`verify-resend:ip:${meta.ip ?? "local"}`, 10);
+      if (!perEmail.ok || !perIp.ok) throw new AuthGatewayError("rate_limited", 429);
+
+      const user = await db.user.findUnique({ where: { email } });
+      if (user && user.emailVerification !== "verified") {
+        const now = new Date();
+        await db.emailVerificationToken.updateMany({
+          where: { userId: user.id, usedAt: null },
+          data: { usedAt: now },
+        });
+        const rawToken = newToken();
+        await db.emailVerificationToken.create({
+          data: {
+            tokenHash: hashToken(rawToken),
+            userId: user.id,
+            expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
+          },
+        });
+        await notify(
+          email,
+          "Verify your Mureeh email",
+          `Open this link to verify your email (valid for 1 hour): ${appUrl()}/verify-email?token=${encodeURIComponent(rawToken)}`,
+          "verification",
+        );
+      }
+      // Identical response for unknown, verified, and pending accounts.
       return { status: "sent" };
     },
 
@@ -590,6 +718,9 @@ export function createGateway(db: PrismaClient) {
         subject: m.subject,
         body: m.body,
         kind: m.kind,
+        deliveryStatus: m.deliveryStatus as "pending" | "sent" | "failed",
+        deliveryAttempts: m.deliveryAttempts,
+        deliveredAt: m.deliveredAt?.toISOString() ?? null,
         createdAt: m.createdAt.toISOString(),
       }));
     },

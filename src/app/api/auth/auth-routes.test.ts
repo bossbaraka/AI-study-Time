@@ -66,7 +66,7 @@ describe("auth routes — validation and stable gateway contracts", () => {
     expect(res.status).toBe(400);
   });
 
-  it("validates the partial resend/verify compatibility routes", async () => {
+  it("validates resend/verify inputs and never confirms an unknown token", async () => {
     expect((await resendVerification(request({}))).status).toBe(400);
     expect((await verifyEmail(request({ token: "" }))).status).toBe(400);
 
@@ -74,9 +74,9 @@ describe("auth routes — validation and stable gateway contracts", () => {
     expect(resend.status).toBe(200);
     expect(await resend.json()).toEqual({ status: "sent" });
 
-    const verify = await verifyEmail(request({ token: "compatibility-token" }));
+    const verify = await verifyEmail(request({ token: "unknown-token" }));
     expect(verify.status).toBe(200);
-    expect(await verify.json()).toEqual({ status: "already-verified" });
+    expect(await verify.json()).toEqual({ status: "invalid" });
   });
 
   it("session is data for an anonymous caller; logout is idempotent without a cookie", async () => {
