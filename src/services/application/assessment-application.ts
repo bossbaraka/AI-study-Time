@@ -41,8 +41,41 @@ export const assessmentApplication = {
     return assessmentEngine.getSession(sessionId, studentId);
   },
 
-  submitAnswer(payload: SubmitAnswerPayload, studentId: string): Promise<AssessmentSession> {
-    return assessmentEngine.submitAnswer(payload, studentId);
+  async submitAnswer(payload: SubmitAnswerPayload, studentId: string): Promise<AssessmentSession> {
+    const session = await assessmentEngine.submitAnswer(payload, studentId);
+    // Intelligence: record per-answer evidence asynchronously (best-effort)
+    try {
+      const { recordAssessmentEvidence } = await import("@/services/application/intelligence-application");
+      // Derive topic/question from the submission; the engine scored it, but we can extract the topic
+      // by re-reading the session's stored answer for this submissionId — simpler: parse from returned session progress
+      // For now, record with topic derived from the payload's questionId prefix or previous engine state.
+      // The assessment store holds the canonical question topic; fetch it via a lightweight helper.
+      let topic: string | null = null;
+      let points = 0;
+      try {
+        const { getPool } = await import("@/services/infrastructure/pg-pool");
+        const pool = getPool();
+        const { rows } = await pool.query(`SELECT "topic","difficulty" FROM "AssessmentQuestion" WHERE "sessionId"=$1 AND "questionId"=$2 LIMIT 1`, [payload.sessionId, payload.response.questionId]);
+        if (rows[0]) topic = rows[0].topic as string;
+        const ar = await pool.query(`SELECT "points" FROM "AssessmentAnswer" WHERE "sessionId"=$1 AND "submissionId"=$2 LIMIT 1`, [payload.sessionId, payload.submissionId]);
+        if (ar.rows[0]) points = ar.rows[0].points as number;
+      } catch {
+        /* offline or test without DB — skip intelligence */
+      }
+      if (topic) {
+        await recordAssessmentEvidence({
+          studentId,
+          sessionId: payload.sessionId,
+          topic,
+          questionId: payload.response.questionId,
+          score: points,
+          correlationId: payload.submissionId,
+        });
+      }
+    } catch {
+      // never break assessment path
+    }
+    return session;
   },
 
   pauseSession(sessionId: string, studentId: string): Promise<AssessmentSession> {

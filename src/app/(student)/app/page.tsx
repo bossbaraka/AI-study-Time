@@ -9,6 +9,7 @@ import { ErrorState } from "@/components/feedback/states";
 import { SectionBlock, StatTile } from "@/components/layout/section-block";
 import { CurrentMissionCard } from "@/features/dashboard/components/current-mission-card";
 import { DailyLoop } from "@/features/dashboard/components/daily-loop";
+import { AdaptiveNextCard } from "@/features/dashboard/components/adaptive-next-card";
 import {
   useDailyPlan,
   useGreetingKey,
@@ -89,6 +90,8 @@ export default function DashboardPage() {
 
       {/* Hero: the mission */}
       <CurrentMissionCard mission={mission} />
+      {/* Adaptive decision — why this mission? */}
+      <AdaptiveNextCard />
 
       <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
         {/* Today's journey loop */}

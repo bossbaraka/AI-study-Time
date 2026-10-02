@@ -24,17 +24,32 @@ const PROTECTED_PREFIXES = [
 
 export function middleware(req: NextRequest): NextResponse {
   const { pathname } = req.nextUrl;
+
+  // Always propagate or mint a requestId for observability
+  const incomingId = req.headers.get("x-request-id");
+  const requestId = incomingId && incomingId.length >= 8 && incomingId.length <= 80
+    ? incomingId
+    : (typeof crypto !== "undefined" && "randomUUID" in crypto ? (crypto as unknown as { randomUUID: () => string }).randomUUID() : Math.random().toString(36).slice(2, 12));
+
   const within = PROTECTED_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
   );
-  if (!within) return NextResponse.next();
+  if (!within) {
+    const res = NextResponse.next();
+    res.headers.set("x-request-id", requestId);
+    return res;
+  }
 
   if (!req.cookies.has(SESSION_COOKIE)) {
     const login = new URL("/sign-in", req.url);
     login.searchParams.set("next", `${pathname}${req.nextUrl.search}`);
-    return NextResponse.redirect(login);
+    const redirect = NextResponse.redirect(login);
+    redirect.headers.set("x-request-id", requestId);
+    return redirect;
   }
-  return NextResponse.next();
+  const res = NextResponse.next();
+  res.headers.set("x-request-id", requestId);
+  return res;
 }
 
 export const config = {

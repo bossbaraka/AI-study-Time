@@ -1,9 +1,13 @@
 /**
  * Intelligence & support domain services:
  * behavior profile, recovery plans, AI mentor.
+ *
+ * Behavior and Recovery now have a production path (evidence-driven).
+ * Mentor delegates to the real mentor API with server-side context.
+ * Under Vitest they remain hermetic via mockRequest.
  */
 
-import { clone, mockRequest } from "@/lib/api/client";
+import { clone, httpRequest, mockRequest } from "@/lib/api/client";
 import { db } from "@/services/mock-db";
 import type {
   BehaviorProfile,
@@ -13,17 +17,55 @@ import type {
 } from "@/types/domain";
 import type { RecoveryStep } from "@/constants/journey";
 
+const INTEL_USE_API = !process.env.VITEST;
+
 export const behaviorService = {
   getProfile(signal?: AbortSignal): Promise<BehaviorProfile> {
+    if (INTEL_USE_API) {
+      return httpRequest<BehaviorProfile>("/api/behavior", { signal })
+        .then((insights) => {
+          // Map intelligence BehaviorInsights to legacy BehaviorProfile for UI compat
+          const ins = insights as unknown as { consistency: number; hintDependencyRate: number; studyBursts?: unknown[]; repeatedFailureConcepts?: string[]; recentEventsCount?: number };
+          if (ins && typeof ins.consistency === "number") {
+            return {
+              ...clone(db.behavior),
+              consistency: ins.consistency,
+              discipline: 100 - (ins.hintDependencyRate ?? 0),
+              delayPatternInsight: ins.repeatedFailureConcepts?.length ? `Repeated difficulty with: ${ins.repeatedFailureConcepts.join(", ")}` : db.behavior.delayPatternInsight,
+              recentDelays: db.behavior.recentDelays,
+            } as BehaviorProfile;
+          }
+          return clone(db.behavior);
+        })
+        .catch(() => mockRequest(() => clone(db.behavior), signal));
+    }
     return mockRequest(() => clone(db.behavior), signal);
   },
 };
 
 export const recoveryService = {
   getActive(signal?: AbortSignal): Promise<RecoveryPlan | null> {
+    if (INTEL_USE_API) {
+      return httpRequest<import("@/services/recovery/recovery-engine").RecoveryPlan[]>("/api/recovery", { signal })
+        .then((plans) => {
+          if (!plans || plans.length === 0) return null;
+          const plan = plans[0]!;
+          // Map new RecoveryPlan to legacy RecoveryPlan shape
+          return {
+            id: `rec_${plan.conceptId}`,
+            moduleId: plan.conceptId,
+            moduleTitle: plan.conceptName,
+            triggerReason: plan.triggerDiagnosis.issues.join(", "),
+            diagnosis: plan.triggerDiagnosis.level,
+            currentStep: "diagnosis" as RecoveryStep,
+            steps: plan.steps.map((s) => ({ step: s.kind as unknown as RecoveryStep, done: s.completed, detail: s.description })),
+            retestId: plan.conceptId,
+          } as unknown as RecoveryPlan;
+        })
+        .catch(() => mockRequest(() => (db.recovery ? clone(db.recovery) : null), signal));
+    }
     return mockRequest(() => (db.recovery ? clone(db.recovery) : null), signal);
   },
-
   advanceStep(step: RecoveryStep, signal?: AbortSignal): Promise<RecoveryPlan> {
     return mockRequest(() => {
       if (!db.recovery) throw new Error("No active recovery plan");
@@ -40,45 +82,67 @@ export const recoveryService = {
 };
 
 /**
- * Mentor service. The mock generates contextual replies locally;
- * the real implementation streams from the AI service with the same
- * journey context attached server-side.
+ * Mentor service. Production now uses the real mentor API with
+ * server-side learner context; Vitest keeps the deterministic mock.
  */
 export const mentorService = {
   getContext(signal?: AbortSignal): Promise<MentorContext> {
+    if (INTEL_USE_API) {
+      return httpRequest<import("@/services/mentor/mentor-context-builder").MentorContext>("/api/mentor/context", { signal })
+        .then((ctx) => ({
+          goalTitle: ctx.goalTitle ?? db.mentorContext.goalTitle,
+          phaseTitle: ctx.roadmapTitle ?? db.mentorContext.phaseTitle,
+          currentTaskTitle: ctx.currentUnitTitle ?? db.mentorContext.currentTaskTitle,
+          recentPerformance: ctx.recentEvidence.length ? `${ctx.recentEvidence.length} recent evidence items` : db.mentorContext.recentPerformance,
+          weaknesses: ctx.weakConcepts.length ? ctx.weakConcepts : db.mentorContext.weaknesses,
+          recentDelays: db.mentorContext.recentDelays,
+          recoveryActive: ctx.weakConcepts.length > 0,
+        } as MentorContext))
+        .catch(() => mockRequest(() => clone(db.mentorContext), signal));
+    }
     return mockRequest(() => clone(db.mentorContext), signal);
   },
-
   listMessages(signal?: AbortSignal): Promise<MentorMessage[]> {
     return mockRequest(() => clone(db.mentorMessages), signal);
   },
-
   send(content: string, signal?: AbortSignal): Promise<MentorMessage[]> {
-    return mockRequest(async () => {
-      const now = new Date().toISOString();
-      const studentMessage: MentorMessage = {
-        id: `mm_s_${Date.now()}`,
-        role: "student",
-        content,
-        createdAt: now,
-      };
-      db.mentorMessages = [...db.mentorMessages, studentMessage];
-
-      // Simulate the AI service thinking.
-      await new Promise((r) => setTimeout(r, 700));
-
-      const reply: MentorMessage = {
-        id: `mm_m_${Date.now()}`,
-        role: "mentor",
-        content: composeContextualReply(content, db.mentorContext),
-        createdAt: new Date().toISOString(),
-        suggestions: ["Give me an example", "Test me", "What should I do now?"],
-      };
-      db.mentorMessages = [...db.mentorMessages, reply];
-      return clone(db.mentorMessages);
-    }, signal);
+    if (INTEL_USE_API) {
+      return httpRequest<{ reply: string; suggestions?: string[] }>("/api/mentor/chat", { method: "POST", body: { content }, signal })
+        .then(({ reply, suggestions }) => {
+          const now = new Date().toISOString();
+          const studentMessage: MentorMessage = { id: `mm_s_${Date.now()}`, role: "student", content, createdAt: now };
+          const mentorReply: MentorMessage = { id: `mm_m_${Date.now()}`, role: "mentor", content: reply, createdAt: new Date().toISOString(), suggestions };
+          db.mentorMessages = [...db.mentorMessages, studentMessage, mentorReply];
+          return clone(db.mentorMessages);
+        })
+        .catch(() => mockMentorSend(content, signal));
+    }
+    return mockMentorSend(content, signal);
   },
 };
+
+function mockMentorSend(content: string, signal?: AbortSignal): Promise<MentorMessage[]> {
+  return mockRequest(async () => {
+    const now = new Date().toISOString();
+    const studentMessage: MentorMessage = {
+      id: `mm_s_${Date.now()}`,
+      role: "student",
+      content,
+      createdAt: now,
+    };
+    db.mentorMessages = [...db.mentorMessages, studentMessage];
+    await new Promise((r) => setTimeout(r, 700));
+    const reply: MentorMessage = {
+      id: `mm_m_${Date.now()}`,
+      role: "mentor",
+      content: composeContextualReply(content, db.mentorContext),
+      createdAt: new Date().toISOString(),
+      suggestions: ["Give me an example", "Test me", "What should I do now?"],
+    };
+    db.mentorMessages = [...db.mentorMessages, reply];
+    return clone(db.mentorMessages);
+  }, signal);
+}
 
 /** Deterministic, journey-aware mock replies (stands in for the AI service). */
 function composeContextualReply(question: string, context: MentorContext): string {

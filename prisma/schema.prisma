@@ -54,6 +54,13 @@ model User {
   auditAsSubject    AuditEvent[]  @relation("Subject")
   resetTokens       PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
+  learningEvents     LearningEvent[]
+  evidences          Evidence[]
+  conceptStates      ConceptState[]
+  recallSchedules    RecallSchedule[]
+  testAttempts       TestAttempt[]
+  guardianLinks      GuardianRelation[] @relation("GuardianLink")
+  studentLinks       GuardianRelation[] @relation("StudentLink")
 }
 
 /// Server-side sessions. Only the SHA-256 of the cookie token is
@@ -417,4 +424,207 @@ model LearningUnitExecution {
   @@unique([roadmapId, learningUnitId])
   @@index([studentId, status])
   @@index([roadmapId])
+}
+
+// ================================================================
+// LEARNING INTELLIGENCE — Phase 4+ persistence
+//
+// Concepts, events, evidence, concept-states, recall and tests
+// form the intelligence substrate the mastery/diagnosis/adaptive
+// engines read. Each has an identity, owner, lifecycle and query
+// pattern — so each earns a table. Value-object-only data stays
+// as Json on the aggregate root.
+// ================================================================
+
+/// Canonical concept catalog. One row per learnable concept, not per
+/// student. LearningUnit and Evidence point AT it; ConceptState points
+/// at it per student. Prerequisites are explicit concept ids, so the
+/// graph is queryable and prerequisites are not free text.
+model Concept {
+  id            String   @id @default(cuid())
+  name          String
+  description   String
+  domain        String
+  prerequisites String[] @default([])
+  difficulty    Int      @default(1) // 1..5
+  version       Int      @default(1)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  conceptStates ConceptState[]
+  evidences     Evidence[]
+  recallSchedules RecallSchedule[]
+
+  @@unique([name, domain])
+  @@index([domain])
+}
+
+/// Append-only learning event stream. The source of truth for
+/// rebuilding learner state from real evidence. Privacy-bounded:
+/// every row carries its studentId and is always queried through it.
+model LearningEvent {
+  id            String   @id @default(cuid())
+  studentId     String
+  student       User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  type          String
+  timestamp     DateTime @default(now())
+  source        String   // api | engine | system
+  entityType    String
+  entityId      String
+  payload       Json
+  schemaVersion Int      @default(1)
+  correlationId String?
+  createdAt     DateTime @default(now())
+
+  @@index([studentId, type])
+  @@index([studentId, timestamp(sort: Desc)])
+  @@index([correlationId])
+  @@index([entityType, entityId])
+}
+
+/// Generalized evidence. One row per observable learner action that
+/// proves (or fails to prove) something. Immutable after evaluation
+/// where appropriate; versioned where revision matters.
+model Evidence {
+  id                  String    @id @default(cuid())
+  studentId           String
+  student             User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conceptId           String?
+  concept             Concept?  @relation(fields: [conceptId], references: [id])
+  kind                String    // answer | reasoning | solution | code | explanation | quiz_result | recall_result | transfer_result | hint_usage
+  payload             Json
+  score               Float?    // 0..1
+  timeSpentSeconds    Int?
+  attemptCount        Int       @default(1)
+  hintUsed            Boolean   @default(false)
+  hintCount           Int       @default(0)
+  learningUnitId      String?
+  roadmapId           String?
+  assessmentSessionId String?
+  testAttemptId       String?
+  immutable           Boolean   @default(false)
+  version             Int       @default(1)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([studentId, conceptId])
+  @@index([studentId, createdAt(sort: Desc)])
+  @@index([conceptId])
+}
+
+/// Per-student, per-concept learner state. Not a single mastery
+/// percentage — a decomposed, source-traceable vector.
+model ConceptState {
+  id                String    @id @default(cuid())
+  studentId         String
+  student           User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conceptId         String
+  concept           Concept   @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+  knowledge         Float     @default(0)
+  retrieval         Float     @default(0)
+  retention         Float     @default(0)
+  transfer          Float     @default(0)
+  fluency           Float     @default(0)
+  confidence        Float     @default(0)
+  hintDependency    Float     @default(0)
+  misconceptionRisk Float     @default(0)
+  evidenceCount     Int       @default(0)
+  lastEvidenceAt    DateTime?
+  stateVersion      Int       @default(1)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([studentId, conceptId])
+  @@index([studentId])
+  @@index([conceptId])
+}
+
+/// Evidence-driven recall schedule. One row per concept that has
+/// been studied; existence means the system knows when to ask again.
+model RecallSchedule {
+  id             String    @id @default(cuid())
+  studentId      String
+  student        User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conceptId      String
+  concept        Concept   @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+  evidenceId     String?
+  intervalDays   Int       @default(1)
+  easeFactor     Float     @default(2.5)
+  repetitions    Int       @default(0)
+  dueAt          DateTime
+  lastReviewedAt DateTime?
+  state          String    @default("new") // new | learning | review | relearning
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([studentId, conceptId])
+  @@index([studentId, dueAt])
+  @@index([conceptId])
+}
+
+/// Server-owned test definition. The question bank lives here,
+/// never in the client bundle.
+model TestDefinition {
+  id               String   @id @default(cuid())
+  title            String
+  moduleId         String?
+  phaseTitle       String?
+  timeLimitMinutes Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  questions TestQuestion[]
+  attempts  TestAttempt[]
+}
+
+model TestQuestion {
+  id                 String         @id @default(cuid())
+  testId             String
+  test               TestDefinition @relation(fields: [testId], references: [id], onDelete: Cascade)
+  kind               String         // multiple_choice | short_answer | scenario | problem_solving
+  prompt             String
+  choices            Json?
+  correctChoiceIndex Int?
+  explanation        String
+  topic              String
+  points             Int            @default(1)
+  rubric             Json?
+
+  @@index([testId])
+}
+
+/// Server-graded attempt. The verdict is never accepted from the client.
+model TestAttempt {
+  id               String         @id @default(cuid())
+  studentId        String
+  student          User           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  testId           String
+  test             TestDefinition @relation(fields: [testId], references: [id], onDelete: Cascade)
+  status           String         @default("submitted")
+  score            Float          @default(0) // 0..100
+  timeSpentSeconds Int
+  answers          Json
+  gradedAnswers    Json?
+  strongTopics     String[]       @default([])
+  needsReviewTopics String[]      @default([])
+  recommendation   String?
+  createdAt        DateTime       @default(now())
+
+  @@index([studentId, testId])
+  @@index([testId])
+}
+
+/// Explicit guardian ↔ student relationship. Server-side ownership
+/// and minimal exposure; never `studentId` from client as authority.
+model GuardianRelation {
+  id         String   @id @default(cuid())
+  guardianId String
+  guardian   User     @relation("GuardianLink", fields: [guardianId], references: [id], onDelete: Cascade)
+  studentId  String
+  student    User     @relation("StudentLink", fields: [studentId], references: [id], onDelete: Cascade)
+  status     String   @default("active") // pending | active | revoked
+  createdAt  DateTime @default(now())
+
+  @@unique([guardianId, studentId])
+  @@index([studentId])
 }
