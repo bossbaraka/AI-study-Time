@@ -1,6 +1,6 @@
 {
   "name": "mureeh-study-assistant",
-  "version": "1.0.0",
+  "version": "1.0.0-aa",
   "private": true,
   "description": "Mureeh Study Assistant — AI-powered learning journey platform frontend",
   "scripts": {
